@@ -128,11 +128,11 @@ else:
         info = True
     if args.download:
         downl = True
-    if args.latest or '-l' in sys.argv:
+    if args.latest or '-l' in sys.argv or '--lista' in sys.argv:
         if args.latest is None:
             args.latest = 'a'
         latest = True
     if args.private:
         private = True
-    if '-c' in sys.argv:
+    if '-c' in sys.argv or '--cronologia' in sys.argv:
         hist = True

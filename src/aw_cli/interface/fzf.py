@@ -80,6 +80,14 @@ class Fzf:
 
                 if process.stdout.strip():
                     return process.stdout.strip()
+
+                if process.returncode not in (0, 1):
+                    self._port = self._find_free_port()
+                    cmd = self._build_cmd(
+                        elements=elements, prompt=prompt, multi=multi, filter=filter
+                    )
+                    if fzf_bin and cmd and cmd[0] == "fzf":
+                        cmd[0] = fzf_bin
         except KeyboardInterrupt:
             exit()
         finally:

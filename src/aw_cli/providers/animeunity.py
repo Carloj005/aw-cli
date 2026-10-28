@@ -1,9 +1,15 @@
 import re
 import json
+import threading
 from html import unescape
 from functools import cached_property
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from ..anime import Anime, AnimeStatus
+from ..domain_resolver import (
+    DEFAULT_ANIMEUNITY_URL,
+    get_configured_provider_url,
+    resolve_animeunity_session,
+)
 from .provider import Provider, HTTPError
 
 class Animeunity(Provider):
@@ -15,19 +21,24 @@ class Animeunity(Provider):
         Client: client HTTP usato per le richieste.
     """
     def __init__(self, client=None):
-        super().__init__("https://www.animeunity.co", client=client)
+        self._session_lock = threading.Lock()
+        if client is not None:
+            base_url = "https://www.animeunity.co"
+        else:
+            base_url = get_configured_provider_url("animeunity", DEFAULT_ANIMEUNITY_URL)
+        super().__init__(base_url, client=client)
 
     @cached_property
     def _session(self) -> str:
-        """Inizializza la sessione (token CSRF + cookies) al primo accesso. Ritorna l'HTML."""
-        response = self.Client.get(self.BASE_URL)
-        html = response.text
-        csrf_match = re.search(r'<meta.*?name="csrf-token".*?content="([^"]*)".*?>', html)
-        if not csrf_match:
-            raise ValueError("CSRF token not found in the HTML")
-        self.Client.headers['x-csrf-token'] = csrf_match.group(1)
-        self.Client.cookies['animeunity_session'] = response.cookies.get('animeunity_session') or ""
-        return html
+        """Inizializza la sessione (token CSRF, cookies e risoluzione dominio) al primo accesso. Ritorna l'HTML."""
+        with self._session_lock:
+            canonical_url, html = resolve_animeunity_session(self.Client, self.BASE_URL)
+            self.BASE_URL = canonical_url
+            csrf_match = re.search(r'<meta.*?name="csrf-token".*?content="([^"]*)".*?>', html)
+            if not csrf_match:
+                raise ValueError("CSRF token not found in the HTML")
+            self.Client.headers['x-csrf-token'] = csrf_match.group(1)
+            return html
 
 
     def _search(self, input: str) -> list[Anime]:
@@ -60,18 +71,19 @@ class Animeunity(Provider):
         animes = list[Anime]()
         for data in json_data:
             result = data['anime']
-            title, _, anilist_id, status, info = self._parse_info(result)
+            title, last_ep, anilist_id, status, info = self._parse_info(result)
             if filter == "d" and info["Audio"] != "Italiano":
                 continue
             if filter == "s" and info["Audio"] == "Italiano":
                 continue
-            anime = Anime(title, str(result['id']), curr_ep=str(data['number']))
+            anime = Anime(title, str(result['id']), curr_ep=str(data['number']), last_ep=last_ep)
             anime.update_episodes({str(data['number']): str(data['id'])}, specials=specials)
             anime.set_info(anilist_id, status, info)
             animes.append(anime)
         return animes
 
     def _episodes(self, anime: Anime) -> dict[str, str]:
+        _ = self._session
         episodes = {}
         start_range = 0
         last_ep_num = int(anime.last_ep) if str(anime.last_ep).isdigit() else 0
@@ -94,6 +106,7 @@ class Animeunity(Provider):
         return episodes
 
     def _episode_link(self, anime: Anime, episode: Anime.Episode) -> str:
+        _ = self._session
         embed_url = f"{self.BASE_URL}/embed-url/{episode.ref}"
         response = self.Client.get(embed_url)
         response.raise_for_status()
@@ -145,6 +158,7 @@ class Animeunity(Provider):
         return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
     def _info_anime(self, anime: Anime):
+        _ = self._session
         if not anime.ref.isdigit():
             raise HTTPError("Errore 404: pagina non trovata")
         search_url = f"{self.BASE_URL}/info_api/{anime.ref}/"
@@ -161,6 +175,8 @@ class Animeunity(Provider):
             case _:
                 anime.status = AnimeStatus.UNKNOWN
         anime.last_ep = str(data['episodes_count'])
+        if anime.info.get("Episodi") in (None, "", "??", "0") and data.get("episodes_count"):
+            anime.info["Episodi"] = str(data["episodes_count"])
         anime.info["Genere"] = ', '.join(data['genres'])
         # anime.info["Correlati"] = data['related']
 

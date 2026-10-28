@@ -3,6 +3,13 @@ import re
 from html import unescape
 from urllib.parse import quote_plus
 from ..anime import Anime, AnimeStatus
+from ..domain_resolver import (
+    DEFAULT_ANIMEWORLD_URL,
+    extract_origin,
+    get_configured_provider_url,
+    install_doh_fallback,
+    resolve_animeworld_url,
+)
 from .provider import Provider, HTTPError
 
 
@@ -18,7 +25,11 @@ class Animeworld(Provider):
     """
 
     def __init__(self, client=None):
-        super().__init__("https://www.animeworld.ac", client=client)
+        if client is not None:
+            base_url = DEFAULT_ANIMEWORLD_URL
+        else:
+            base_url = get_configured_provider_url("animeworld", DEFAULT_ANIMEWORLD_URL)
+        super().__init__(base_url, client=client)
         self._visited = {}
 
     @lru_cache
@@ -30,7 +41,17 @@ class Animeworld(Provider):
         if not re.match(r"^https?://", url):
             raise HTTPError("Errore 404: pagina non trovata")
 
-        response = self.Client.get(url)
+        install_doh_fallback()
+        try:
+            response = self.Client.get(url)
+        except Exception:
+            if url == self.BASE_URL:
+                self.BASE_URL = resolve_animeworld_url(self.Client, self.BASE_URL)
+                url = self.BASE_URL
+            response = self.Client.get(url)
+
+        if url == self.BASE_URL and getattr(response, "url", None):
+            self.BASE_URL = extract_origin(str(response.url), fallback=self.BASE_URL)
 
         # Gestione cookie impostati tramite JavaScript (document.cookie)
         cookie_match = re.search(

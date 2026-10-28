@@ -220,9 +220,18 @@ def open_mpv(ep_url: str, ep_name: str, progress: int) -> tuple[bool, int]:
         "--",
         ep_url,
     ]
-    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+    result = subprocess.run(
+        command,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
 
-    if res := re.findall(r"(\d+):(\d+):(\d+) / [\d:]+ \((\d+)%\)", result.stdout):
+    combined_out = f"{result.stdout or ''}\n{result.stderr or ''}"
+    if res := re.findall(r"(\d+):(\d+):(\d+) / [\d:]+ \((\d+)%\)", combined_out):
         last = res[-1]
         return (
             int(last[3]) >= complete_limit,
@@ -456,6 +465,7 @@ def setup_config() -> None:
     ut.config_data["provider"]["source"] = Fzf().run(
         ["animeunity", "animeworld"], "Scegli il provider: "
     )
+    ut.config_data["provider"]["animeunity_url"] = "https://animeunity.co"
 
     # scelta disco / cartella di download (supporto dischi secondari)
     if ut.os_name != "Android":
@@ -585,7 +595,10 @@ def list_anime_names(animelist: list[Anime]) -> list[str]:
         name = f"\033[0;3{colour}m{i + 1}  \033[0;37m"
 
         if hist:
-            name += f"{a.name} [Ep {a.curr_ep}/{a.info['Episodi']}]"
+            ep_tot = a.info.get("Episodi")
+            if not ep_tot or ep_tot == "??":
+                ep_tot = a.last_ep if a.last_ep and a.last_ep != "0" else "??"
+            name += f"{a.name} [Ep {a.curr_ep}/{ep_tot}]"
         elif latest:
             name += f"{a.name} [Ep {a.curr_ep}]"
         else:
