@@ -43,6 +43,13 @@ def update_link(self, callback, anime: Anime, episode: Anime.Episode | None = No
             ut.console.print("Cercarlo manualmente", style="highlight")
             exit(1)
         anime.ref = res[0].ref
+        if len(anime.episodes()) > 0 and callback.__name__ != "_episodes":
+            try:
+                anime.update_episodes(
+                    self._episodes(anime), ut.config_data["general"].get("specials", False)
+                )
+            except Exception:
+                pass
         return callback(self, anime)
 
 
