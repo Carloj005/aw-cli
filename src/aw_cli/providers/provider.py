@@ -118,7 +118,7 @@ class Provider(ABC):
         Returns:
             list[Anime]: la lista degli anime trovati.
         """
-        specials = ut.config_data["general"]["specials"]
+        specials = ut.config_data["general"].get("specials", False)
         animes = self._latest(filter, specials)
 
         grouped_animes: dict[str, list[Anime]] = {}
@@ -154,7 +154,7 @@ class Provider(ABC):
             anime (Anime): l'anime di riferimento.
         """
         anime.update_episodes(
-            self._episodes(anime), ut.config_data["general"]["specials"]
+            self._episodes(anime), ut.config_data["general"].get("specials", False)
         )
 
     @abstractmethod

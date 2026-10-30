@@ -10,6 +10,7 @@ Modulo per la risoluzione dinamica e l'auto-aggiornamento dei domini dei provide
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import socket
@@ -121,9 +122,13 @@ def resolve_via_doh(hostname: str) -> str | None:
                 data = resp.json()
                 for answer in data.get("Answer", []):
                     ip = str(answer.get("data", "")).strip()
-                    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", ip) and not ip.startswith(("127.", "0.")):
-                        _DOH_IP_CACHE[hostname] = ip
-                        return ip
+                    try:
+                        parsed_ip = ipaddress.ip_address(ip)
+                        if parsed_ip.version == 4 and parsed_ip.is_global:
+                            _DOH_IP_CACHE[hostname] = ip
+                            return ip
+                    except ValueError:
+                        continue
             except Exception:
                 continue
     return None
@@ -209,6 +214,10 @@ def save_configured_provider_url(provider_name: str, working_url: str) -> None:
             disk_cfg["provider"][key] = normalized
             with open(config_path, "w", encoding="utf-8") as f:
                 ut.toml.dump(disk_cfg, f)
+            try:
+                os.chmod(config_path, 0o600)
+            except OSError:
+                pass
     except Exception:
         pass
 
@@ -227,7 +236,12 @@ def _discover_urls_from_sources(client: Client, sources: list[str], domain_keywo
         os.environ.get("AW_CLI_TELEGRAM_URL", "").strip()
         or ut.config_data.get("provider", {}).get("telegram_url", "").strip()
     )
-    all_sources = ([custom_tg] if custom_tg else []) + list(sources)
+    valid_custom_tg = (
+        [custom_tg]
+        if custom_tg and urlsplit(custom_tg).scheme.lower() == "https" and urlsplit(custom_tg).netloc
+        else []
+    )
+    all_sources = valid_custom_tg + list(sources)
 
     for src in all_sources:
         try:

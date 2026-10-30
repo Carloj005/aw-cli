@@ -1,7 +1,7 @@
 from functools import lru_cache
 import re
 from html import unescape
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit
 from ..anime import Anime, AnimeStatus
 from ..domain_resolver import (
     DEFAULT_ANIMEWORLD_URL,
@@ -175,16 +175,31 @@ class Animeworld(Provider):
             player_id = player_id.split("/")[-1]
 
         api_url = f"{self.BASE_URL}/api/episode/serverPlayerAnimeWorld?id={player_id}"
-        response = self.Client.get(api_url)
+        with self._http_lock:
+            response = self.Client.get(api_url)
         response.raise_for_status()
 
-        source_match = re.search(r'<source src="([^"]+)"', response.text)
-        if not source_match:
+        source_matches = re.findall(r'<source\s+[^>]*src="([^"]+)"[^>]*>', response.text)
+        if not source_matches:
+            source_match = re.search(r'<source src="([^"]+)"', response.text)
+            if source_match:
+                source_matches = [source_match.group(1)]
+        if not source_matches:
             raise ValueError("Errore nel parsing della pagina dell'episodio")
-        src_url = source_match.group(1).strip()
-        if not re.match(r"^https?://", src_url):
+
+        valid_urls: list[tuple[int, str]] = []
+        for raw in source_matches:
+            candidate = raw.strip()
+            parts = urlsplit(candidate)
+            if parts.scheme in {"http", "https"} and parts.netloc:
+                q_match = re.search(r"(2160|1440|1080|720|480|360)p?", candidate, re.IGNORECASE)
+                q_score = int(q_match.group(1)) if q_match else 0
+                valid_urls.append((q_score, candidate))
+
+        if not valid_urls:
             raise ValueError("URL del video non valido")
-        return src_url
+        valid_urls.sort(key=lambda item: item[0], reverse=True)
+        return valid_urls[0][1]
 
     def _info_anime(self, anime: Anime):
         html = self._get_html(anime.ref)

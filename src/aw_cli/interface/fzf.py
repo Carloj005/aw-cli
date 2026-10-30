@@ -162,16 +162,23 @@ class Fzf:
             cmd += ["--multi", "--bind", "ctrl-a:toggle-all"]
 
         if filter:
+            safe_inline = all(
+                bool(re.fullmatch(r"[A-Za-z0-9._ -]+", str(e))) for e in elements
+            )
+            with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as f:
+                json.dump(elements, f)
+                ep_file = f.name
+            if not hasattr(self, "_temp_files"):
+                self._temp_files = []
+            self._temp_files.append(ep_file)
+
+            inline_arg = f" --episodes '{json.dumps(elements)}'" if safe_inline else ""
             if sys.platform == "win32":
-                with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as f:
-                    json.dump(elements, f)
-                    ep_file = f.name
-                if not hasattr(self, "_temp_files"):
-                    self._temp_files = []
-                self._temp_files.append(ep_file)
-                reload_cmd = f'"{sys.executable}" -m aw_cli.interface.fzf --filter {{q}} --episodes-file "{ep_file}" --episodes \'{json.dumps(elements)}\''
+                reload_cmd = f'"{sys.executable}" -m aw_cli.interface.fzf --filter {{q}} --episodes-file "{ep_file}"{inline_arg}'
             else:
-                reload_cmd = f"{sys.executable} -m aw_cli.interface.fzf --filter {{q}} --episodes '{json.dumps(elements)}'"
+                escaped_file = ep_file.replace("'", "'\\''")
+                escaped_py = sys.executable.replace("'", "'\\''")
+                reload_cmd = f"'{escaped_py}' -m aw_cli.interface.fzf --filter {{q}} --episodes-file '{escaped_file}'{inline_arg}"
             cmd += [
                 "--phony",
                 "--bind",

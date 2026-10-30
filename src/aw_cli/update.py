@@ -1,3 +1,5 @@
+import re
+import sys
 import subprocess
 import shutil
 from . import utilities as ut
@@ -10,18 +12,18 @@ TOOLS = {
     "uv": {
         "list": ["uv", "tool", "list"],
         "update": ["uv", "tool", "update", "aw-cli"],
-        "install_git": ["uv", "tool", "install", REPO_URL, "--force"]
+        "install_git": ["uv", "tool", "install", REPO_URL, "--force"],
     },
     "pipx": {
         "list": ["pipx", "list"],
         "update": ["pipx", "update", "aw-cli"],
-        "install_git": ["pipx", "install", REPO_URL, "--force"]
+        "install_git": ["pipx", "install", REPO_URL, "--force"],
     },
     "pip": {
-        "list": ["pip", "list"],
-        "update": ["pip", "install", "aw-cli", "--upgrade"],
-        "install_git": ["pip", "install", REPO_URL, "--force-reinstall"]
-    }
+        "list": [sys.executable, "-m", "pip", "list"],
+        "update": [sys.executable, "-m", "pip", "install", "aw-cli", "--upgrade"],
+        "install_git": [sys.executable, "-m", "pip", "install", REPO_URL, "--force-reinstall"],
+    },
 }
 
 
@@ -33,11 +35,13 @@ def check_installation_method() -> str | None:
         str | None: il nome del tool rilevato, o None se non trovato.
     """
     for tool_name, commands in TOOLS.items():
-        if shutil.which(tool_name):
-            result = subprocess.run(commands["list"], capture_output=True)
+        exe = commands["list"][0]
+        if shutil.which(exe) or exe == sys.executable:
+            result = subprocess.run(commands["list"], capture_output=True, check=False)
             if result.returncode == 0 and "aw-cli" in result.stdout.decode("utf-8", errors="replace"):
                 return tool_name
     return None
+
 
 def update(branch: str) -> None:
     """
@@ -46,7 +50,12 @@ def update(branch: str) -> None:
     Args:
         branch (str): il branch da cui aggiornare lo script. Se la stringa è vuota, aggiorna all'ultima versione stabile.
     """
-    if not branch:
+    clean_branch = branch.strip() if branch else ""
+    if clean_branch and (clean_branch.startswith("-") or not re.fullmatch(r"[A-Za-z0-9._/-]{1,100}", clean_branch)):
+        ut.console.print("Nome branch non valido!", style="error")
+        return
+
+    if not clean_branch:
         try:
             import httpx
             from importlib.metadata import version
@@ -65,6 +74,6 @@ def update(branch: str) -> None:
         ut.console.print("Non è stato possibile trovare un metodo di installazione valido per aggiornare aw-cli", style="error")
         return
 
-    command = TOOLS[tool]["install_git"] if branch else TOOLS[tool]["update"]
-    command = [cmd.replace("branch-name", branch) for cmd in command] # sostituisco "branch-name" con il nome del branch
-    subprocess.run(command)
+    command = TOOLS[tool]["install_git"] if clean_branch else TOOLS[tool]["update"]
+    command = [cmd.replace("branch-name", clean_branch) for cmd in command]
+    subprocess.run(command, check=False)

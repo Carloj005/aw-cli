@@ -193,3 +193,126 @@ def test_rewatch_menu_offers_resume_or_restart_when_progress_exists(monkeypatch)
     monkeypatch.setattr(run.Fzf, "run", lambda self, elems, prompt="> ", **kw: "ricomincia dall'inizio")
     assert menu["riguarda"]() is ep1
     assert ep1.progress == 0
+
+
+def test_max_quality_selection_ranks_highest_resolution_and_bitrate():
+    from aw_cli.anime import Anime
+    from aw_cli.providers.animeworld import Animeworld
+
+    # 1. AnimeUnity: even if 480p/720p appear first or have misleading order, 1920x1080 wins, and canPlayFHD=1 unlocks h=1
+    mock_client = MagicMock()
+    au = Animeunity(client=mock_client)
+    setattr(au, "_session", "<html></html>")
+
+    page = """
+        window.masterPlaylist = {
+            params: {'token': 't', 'expires': '999'},
+            url: 'https://vixcloud.cc/playlist/555',
+        };
+        window.canPlayFHD = 1;
+    """
+    manifest = (
+        "#EXTM3U\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=1080000,RESOLUTION=854x480\n"
+        "https://vixcloud.cc/playlist/555?rendition=480p\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=4500000,RESOLUTION=1920x1080\n"
+        "https://vixcloud.cc/playlist/555?rendition=1080p\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1280x720\n"
+        "https://vixcloud.cc/playlist/555?rendition=720p\n"
+    )
+    r1 = MagicMock(text="https://vixcloud.cc/embed/555?canPlayFHD=1")
+    r1.raise_for_status = lambda: None
+    r2 = MagicMock(text=page)
+    r2.raise_for_status = lambda: None
+    r3 = MagicMock(text=manifest, url="https://vixcloud.cc/playlist/555")
+    r3.raise_for_status = lambda: None
+    mock_client.get.side_effect = [r1, r2, r3]
+
+    anime = Anime("Quality Test", "1")
+    ep = Anime.Episode(anime, "1", "10")
+    cands = au._episode_stream_candidates(anime, ep)
+    assert cands[0] == "https://vixcloud.cc/playlist/555?rendition=1080p"
+    assert "h=1" in cands[1]
+
+    # 2. AnimeWorld: picks 1080p source over 480p/720p if multiple <source> tags exist
+    aw_mock = MagicMock()
+    aw = Animeworld(client=aw_mock)
+    aw_resp = MagicMock(
+        text='<video><source src="https://cdn.example.com/ep1_480p.mp4"><source src="https://cdn.example.com/ep1_1080p.mp4"></video>'
+    )
+    aw_resp.raise_for_status = lambda: None
+    aw_mock.get.return_value = aw_resp
+    assert aw._episode_link(anime, ep) == "https://cdn.example.com/ep1_1080p.mp4"
+
+
+def test_security_doh_rejects_private_and_metadata_ips(monkeypatch):
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "Answer": [
+                    {"data": "169.254.169.254"},
+                    {"data": "192.168.1.1"},
+                    {"data": "10.0.0.1"},
+                    {"data": "104.21.55.12"},
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def get(self, *a, **kw):
+            return FakeResp()
+
+    monkeypatch.setattr(domain_resolver, "Client", FakeClient)
+    domain_resolver._DOH_IP_CACHE.pop("test.animeunity.co", None)
+    ip = domain_resolver.resolve_via_doh("test.animeunity.co")
+    assert ip == "104.21.55.12"
+
+
+def test_security_fzf_filter_and_update_branch_block_injection(monkeypatch):
+    from aw_cli.interface.fzf import Fzf
+    from aw_cli import update
+
+    fzf = Fzf()
+    try:
+        malicious_elements = ["1", "2'; calc.exe & echo '3"]
+        cmd = fzf._build_cmd(malicious_elements, "> ", multi=False, filter=True)
+        binds = [c for c in cmd if c.startswith("change:reload(")]
+        assert len(binds) == 1
+        assert "calc.exe" not in binds[0]
+        assert "--episodes-file" in binds[0]
+    finally:
+        fzf._cleanup_temp_files()
+
+    ran_cmds = []
+    monkeypatch.setattr(update.subprocess, "run", lambda cmd, **kw: ran_cmds.append(cmd))
+    update.update("--index-url=https://evil.example")
+    update.update("main;whoami")
+    assert ran_cmds == []
+
+
+def test_local_provider_handles_temp_files_and_untracked_folders(tmp_path):
+    from aw_cli.anime import Anime
+    from aw_cli.providers.local import LocalProvider
+
+    anime_dir = tmp_path / "Solo Leveling"
+    anime_dir.mkdir()
+    (anime_dir / "Solo Leveling Ep. 1.mp4").write_bytes(b"00")
+    (anime_dir / "Solo Leveling Ep. 2.mp4.temp").write_bytes(b"00")
+    (anime_dir / "desktop.ini").write_text("test", encoding="utf-8")
+    (tmp_path / "Empty Folder").mkdir()
+
+    lp = LocalProvider(str(tmp_path), history=[])
+    found = lp._search("")
+    assert len(found) == 1
+    assert found[0].name == "Solo Leveling"
+    assert found[0].episodes() == ["1"]

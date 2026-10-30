@@ -63,7 +63,10 @@ def get_user_id(token: str) -> int:
     """
 
     headers = {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', 'Accept': 'application/json'}
-    response = httpx.post('https://graphql.anilist.co', headers=headers, json={'query': query})
+    try:
+        response = httpx.post('https://graphql.anilist.co', headers=headers, json={'query': query}, timeout=10)
+    except httpx.HTTPError as exc:
+        raise TokenError("Errore di connessione ad AniList") from exc
     if response.status_code != 200:
         raise TokenError("Errore: Token AniList sbagliato")
 
@@ -124,7 +127,14 @@ def make_anilist_request(token: str, query: str, var: dict) -> None:
     """
 
     header_anilist = {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', 'Accept': 'application/json'}
-    risposta = httpx.post('https://graphql.anilist.co', headers=header_anilist, json={'query': query, 'variables': var})
-
-    if risposta.status_code != 200:
+    try:
+        risposta = httpx.post(
+            'https://graphql.anilist.co',
+            headers=header_anilist,
+            json={'query': query, 'variables': var},
+            timeout=10,
+        )
+        if risposta.status_code != 200:
+            print("Impossibile aggiornare AniList!")
+    except httpx.HTTPError:
         print("Impossibile aggiornare AniList!")

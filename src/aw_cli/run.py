@@ -179,6 +179,7 @@ def open_syncplay(ep_url: str, ep_name: str, progress: int) -> tuple[bool, int]:
 
 
 MPV_STREAM_ARGS: list[str] = [
+    "--ytdl=no",
     "--hls-bitrate=max",
     "--hr-seek=no",
     "--cache=yes",
@@ -221,10 +222,21 @@ def _open_mpv_detailed(ep_url: str, ep_name: str, progress: int) -> tuple[bool, 
     """
     if ut.os_name == "Android":
         subprocess.run(
-            f'am start --user 0 -a android.intent.action.VIEW -d "{ep_url}" -n is.xyz.mpv/.MPVActivity',
-            shell=True,
+            [
+                "am",
+                "start",
+                "--user",
+                "0",
+                "-a",
+                "android.intent.action.VIEW",
+                "-d",
+                ep_url,
+                "-n",
+                "is.xyz.mpv/.MPVActivity",
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            check=False,
         )
         return True, 0, True, True
 
@@ -296,10 +308,24 @@ def open_vlc(ep_url: str, ep_name: str, progress: int) -> tuple[bool, int]:
 
     if ut.os_name == "Android":
         subprocess.run(
-            f'am start --user 0 -a android.intent.action.VIEW -d "{ep_url}" -n org.videolan.vlc/.StartActivity -e "title" "{ep_name}"',
-            shell=True,
+            [
+                "am",
+                "start",
+                "--user",
+                "0",
+                "-a",
+                "android.intent.action.VIEW",
+                "-d",
+                ep_url,
+                "-n",
+                "org.videolan.vlc/.StartActivity",
+                "-e",
+                "title",
+                ep_name,
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            check=False,
         )
         return True, 0
 
@@ -375,7 +401,9 @@ def update_anilist(
     status_list = "CURRENT" if not drop else "DROPPED"
     # se ho finito di vedere l'anime o lo stato è dropped
     if (
-        episode.numeric() == int(anime.last_ep) and anime.status == AnimeStatus.FINISHED
+        str(anime.last_ep).isdigit()
+        and episode.numeric() == int(anime.last_ep)
+        and anime.status == AnimeStatus.FINISHED
     ) or status_list == "DROPPED":
         if status_list == "CURRENT":
             status_list = "COMPLETED"
@@ -658,6 +686,10 @@ def setup_config() -> None:
     config = ut.get_config_path()
     with open(config, "w", encoding="utf-8") as f:
         ut.toml.dump(ut.config_data, f)
+    try:
+        os.chmod(config, 0o600)
+    except OSError:
+        pass
 
 
 def list_anime_names(animelist: list[Anime]) -> list[str]:
@@ -735,7 +767,16 @@ def remove_from_history(anime: Anime) -> None:
                 ut.config_data["anilist"]["user_id"],
                 anime.anilist_id,
             )
-            update_anilist(anime, anime.episode(anime.curr_ep), rating, drop=True)
+            target_ep = (
+                anime.episode(anime.curr_ep)
+                if anime.has_episode(anime.curr_ep)
+                else Anime.Episode(
+                    anime,
+                    anime.curr_ep if str(anime.curr_ep).isdigit() else "0",
+                    "",
+                )
+            )
+            update_anilist(anime, target_ep, rating, drop=True)
 
     history.remove(anime)
 
@@ -874,7 +915,12 @@ def main():
             reload = False
             continue
 
-        if hist and anime.episode(anime.curr_ep).is_completed():
+        if (hist or latest) and not anime.has_episode(anime.curr_ep):
+            provider.episodes(anime)
+            if not anime.has_episode(anime.curr_ep) and anime.episodes():
+                anime.curr_ep = anime.episodes()[-1]
+
+        if hist and anime.has_episode(anime.curr_ep) and anime.episode(anime.curr_ep).is_completed():
             ep_corrente = anime.episode(anime.curr_ep)
             if not ep_corrente.has_next():
                 provider.episodes(anime)
