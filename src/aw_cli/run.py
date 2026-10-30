@@ -178,6 +178,91 @@ def open_syncplay(ep_url: str, ep_name: str, progress: int) -> tuple[bool, int]:
     )
 
 
+MPV_STREAM_ARGS: list[str] = [
+    "--hls-bitrate=max",
+    "--hr-seek=no",
+    "--cache=yes",
+    "--demuxer-max-bytes=150MiB",
+    "--demuxer-max-back-bytes=75MiB",
+    "--network-timeout=8",
+    "--stream-lavf-o=reconnect=1,reconnect_delay_max=3",
+]
+
+
+def _flush_console_input() -> None:
+    """Svuota eventuali tasti rimasti nel buffer della console Windows alla chiusura del player."""
+    if sys.platform == "win32":
+        try:
+            import msvcrt
+
+            while msvcrt.kbhit():
+                msvcrt.getwch()
+        except Exception:
+            pass
+
+
+def _resolve_mpv_binary() -> str:
+    """Risolve il percorso dell'eseguibile mpv, preferendo mpv.exe diretto su Windows."""
+    player_path = ut.config_data["player"].get("path", "")
+    if not player_path or not Path(player_path).exists():
+        found = ut.find_binary("mpv")
+        if found:
+            player_path = found
+    if sys.platform == "win32" and player_path.lower().endswith("mpv.com"):
+        exe_candidate = Path(player_path).with_suffix(".exe")
+        if exe_candidate.exists():
+            player_path = str(exe_candidate)
+    return player_path
+
+
+def _open_mpv_detailed(ep_url: str, ep_name: str, progress: int) -> tuple[bool, int, bool, bool]:
+    """
+    Esegue mpv e restituisce `(completed, new_progress, playback_ok, had_av_output)`.
+    """
+    if ut.os_name == "Android":
+        subprocess.run(
+            f'am start --user 0 -a android.intent.action.VIEW -d "{ep_url}" -n is.xyz.mpv/.MPVActivity',
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True, 0, True, True
+
+    player_path = _resolve_mpv_binary()
+    is_remote_stream = ep_url.startswith(("http://", "https://"))
+
+    command = [
+        player_path,
+        f"--force-media-title={ep_name}",
+        f"--start={progress}",
+        "--fullscreen",
+        "--keep-open",
+        *(MPV_STREAM_ARGS if is_remote_stream else []),
+        "--",
+        ep_url,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError:
+        return False, 0, False, False
+
+    combined_out = f"{result.stdout or ''}\n{result.stderr or ''}"
+    if res := re.findall(r"(\d+):(\d+):(\d+) / [\d:]+ \((\d+)%\)", combined_out):
+        last = res[-1]
+        parsed_progress = (int(last[0]) * 3600) + (int(last[1]) * 60) + int(last[2])
+        return int(last[3]) >= complete_limit, parsed_progress, True, True
+
+    return False, 0, result.returncode == 0, False
+
+
 def open_mpv(ep_url: str, ep_name: str, progress: int) -> tuple[bool, int]:
     """
     Apre MPV per riprodurre il video.
@@ -191,54 +276,8 @@ def open_mpv(ep_url: str, ep_name: str, progress: int) -> tuple[bool, int]:
         bool: True se l'episodio è stato riprodotto completamente, altrimenti False.
         int: il progresso dell'episodio.
     """
-
-    if ut.os_name == "Android":
-        subprocess.run(
-            f'am start --user 0 -a android.intent.action.VIEW -d "{ep_url}" -n is.xyz.mpv/.MPVActivity',
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return True, 0
-
-    player_path = ut.config_data["player"].get("path", "")
-    if not player_path or not Path(player_path).exists():
-        found = ut.find_binary("mpv")
-        if found:
-            player_path = found
-    if sys.platform == "win32" and player_path.lower().endswith("mpv.exe"):
-        com_candidate = Path(player_path).with_suffix(".com")
-        if com_candidate.exists():
-            player_path = str(com_candidate)
-
-    command = [
-        player_path,
-        f"--force-media-title={ep_name}",
-        f"--start={progress}",
-        "--fullscreen",
-        "--keep-open",
-        "--",
-        ep_url,
-    ]
-    result = subprocess.run(
-        command,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-
-    combined_out = f"{result.stdout or ''}\n{result.stderr or ''}"
-    if res := re.findall(r"(\d+):(\d+):(\d+) / [\d:]+ \((\d+)%\)", combined_out):
-        last = res[-1]
-        return (
-            int(last[3]) >= complete_limit,
-            ((int(last[0]) * 3600) + (int(last[1]) * 60) + int(last[2])),
-        )
-
-    return False, 0
+    completed, parsed_progress, _, _ = _open_mpv_detailed(ep_url, ep_name, progress)
+    return completed, parsed_progress
 
 
 def open_vlc(ep_url: str, ep_name: str, progress: int) -> tuple[bool, int]:
@@ -404,17 +443,68 @@ def watch_episode(
 
     # se il video è già stato scaricato lo riproduco invece di farlo in streaming
     local_file = download.path(create=False) / anime.name / f"{episode}.mp4"
+    prev_progress = episode.progress
 
     if local_file.exists():
-        ep_url = str(local_file) if ut.os_name in ("Android", "Windows") else "file://" + str(local_file)
+        stream_candidates = [
+            str(local_file)
+            if ut.os_name in ("Android", "Windows")
+            else "file://" + str(local_file)
+        ]
+    elif hasattr(provider, "episode_stream_candidates"):
+        stream_candidates = provider.episode_stream_candidates(anime, episode)
     else:
-        ep_url = provider.episode_link(anime, episode)
+        stream_candidates = [provider.episode_link(anime, episode)]
 
     ut.console.clear()
     ut.console.print(f"Riproduco {episode}...", style="info")
-    completed, progress = open_player(ep_url, str(episode), episode.progress)
+
+    playback_ok = True
+    had_av_output = True
+    completed, progress = False, 0
+
+    if open_player is open_mpv:
+        playback_ok = False
+        for candidate_url in stream_candidates:
+            completed, progress, playback_ok, had_av_output = _open_mpv_detailed(
+                candidate_url, str(episode), prev_progress
+            )
+            if playback_ok:
+                break
+
+        # Se tutti gli URL candidati hanno fallito (es. token scaduto o errore 503 temporaneo),
+        # rigeneriamo i link una volta dopo una breve pausa e riproviamo.
+        if not playback_ok and not local_file.exists():
+            sleep(0.6)
+            refreshed = (
+                provider.episode_stream_candidates(anime, episode)
+                if hasattr(provider, "episode_stream_candidates")
+                else [provider.episode_link(anime, episode)]
+            )
+            for candidate_url in refreshed:
+                completed, progress, playback_ok, had_av_output = _open_mpv_detailed(
+                    candidate_url, str(episode), prev_progress
+                )
+                if playback_ok:
+                    break
+    else:
+        completed, progress = open_player(stream_candidates[0], str(episode), prev_progress)
+
+    _flush_console_input()
+
+    if not playback_ok:
+        ut.console.print(
+            "Impossibile aprire lo stream video (server occupato o connessione interrotta). Riprova tra qualche secondo.",
+            style="error",
+        )
+        sleep(1.5)
+        return
 
     if not private:
+        # Se il player è stato chiuso istantaneamente prima di emettere frame video,
+        # non azzeriamo un eventuale progresso precedente già salvato.
+        if not completed and progress == 0 and not had_av_output and prev_progress > 0:
+            progress = prev_progress
         episode.set_progress(progress)
         if completed:
             episode.mark_completed()
@@ -654,6 +744,24 @@ def remove_from_history(anime: Anime) -> None:
         exit()
 
 
+def _rewatch_episode(episode: Anime.Episode) -> Anime.Episode:
+    """
+    Gestisce l'azione 'riguarda': se l'episodio ha un progresso parziale salvato,
+    permette di scegliere se riprendere da quel punto o ricominciare dall'inizio (00:00).
+    """
+    if episode.progress > 0:
+        mins, secs = divmod(episode.progress, 60)
+        hrs, mins = divmod(mins, 60)
+        ts = f"{hrs:02d}:{mins:02d}:{secs:02d}" if hrs else f"{mins:02d}:{secs:02d}"
+        choice = Fzf().run(
+            ["ricomincia dall'inizio", f"riprendi da {ts}"],
+            prompt="Riguarda episodio: ",
+        )
+        if choice == "ricomincia dall'inizio":
+            episode.set_progress(0, completed=False)
+    return episode
+
+
 def create_ep_menu(
     anime: Anime, episode: Anime.Episode
 ) -> dict[str, Callable[[], Anime.Episode | str]]:
@@ -674,7 +782,7 @@ def create_ep_menu(
         "indietro": lambda: "break",
         "seleziona": lambda: select_episodes(anime)[0],
         "antecedente": episode.prev,
-        "riguarda": lambda: episode,
+        "riguarda": lambda: _rewatch_episode(episode),
         "prossimo": episode.next,
     }
 
@@ -802,12 +910,21 @@ def main():
             if answer == "indietro":
                 continue
 
+        episodes_thread: Thread | None = None
         needs_fetch = not anime.has_all_episodes()
         if needs_fetch and not offline:
-            Thread(target=provider.episodes, args=(anime,), daemon=True).start()
+            episodes_thread = Thread(
+                target=provider.episodes, args=(anime,), daemon=True
+            )
+            episodes_thread.start()
 
         while True:
             watch_episode(anime, episode, provider)
+
+            if episodes_thread is not None and episodes_thread.is_alive():
+                episodes_thread.join(timeout=5.0)
+            if anime.has_episode(episode.num):
+                episode = anime.episode(episode.num)
 
             # menù che si visualizza dopo aver finito la riproduzione
             menu_actions = create_ep_menu(anime, episode)

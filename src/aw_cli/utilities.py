@@ -140,11 +140,11 @@ def find_binary(name: str) -> str | None:
     nelle cartelle WinGet/Scoop e su tutti i dischi installati (primario e secondari).
     """
     if sys.platform == "win32" and name.lower() == "mpv":
-        direct = shutil.which("mpv.com") or shutil.which("mpv")
+        direct = shutil.which("mpv.exe") or shutil.which("mpv")
         if direct:
             p = Path(direct)
-            if p.suffix.lower() == ".exe" and p.with_suffix(".com").exists():
-                return str(p.with_suffix(".com"))
+            if p.suffix.lower() == ".com" and p.with_suffix(".exe").exists():
+                return str(p.with_suffix(".exe"))
             return direct
     else:
         direct = shutil.which(name)
@@ -155,7 +155,7 @@ def find_binary(name: str) -> str | None:
         return None
 
     exe_names = (
-        ["mpv.com", "mpv.exe"]
+        ["mpv.exe", "mpv.com"]
         if name.lower() == "mpv"
         else [f"{name}.exe", f"{name}.cmd", f"{name}.bat"]
     )

@@ -184,14 +184,24 @@ def episodes(anime: Anime, episodes: list[Anime.Episode], provider: Provider) ->
                     elif connections > 1 and accept_ranges and total > 0:
                         # Download segmentato: più connessioni in parallelo sullo stesso
                         # file, per aggirare i limiti di banda per-connessione dei CDN.
+                        # I server /download/ di VixCloud hanno limit_conn=2 per IP (HTTP 503 oltre 2).
+                        host = (urlsplit(url).hostname or "").lower()
+                        if host.endswith("vix-content.net"):
+                            eff_connections = 1 if len(episodes) > 1 else min(connections, 2)
+                        else:
+                            eff_connections = connections
                         progress.update(task_id, total=total, phase=None)
-                        with open(temp_filename, "wb") as f:
-                            f.truncate(total)
-                        segments = [
-                            download_segment(client, start, end)
-                            for start, end in _segment_ranges(total, connections)
-                        ]
-                        await asyncio.gather(*segments)
+                        try:
+                            with open(temp_filename, "wb") as f:
+                                f.truncate(total)
+                            segments = [
+                                download_segment(client, start, end)
+                                for start, end in _segment_ranges(total, eff_connections)
+                            ]
+                            await asyncio.gather(*segments)
+                        except Exception:
+                            progress.update(task_id, completed=0, total=total, phase=None)
+                            await single_stream(client)
                     else:
                         # Server senza supporto ai range (o dimensione ignota): fallback.
                         progress.update(task_id, phase=None)
