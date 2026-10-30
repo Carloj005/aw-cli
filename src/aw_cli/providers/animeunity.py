@@ -123,7 +123,10 @@ class Animeunity(Provider):
                     if iframe_parts.scheme in {"http", "https"} and iframe_parts.netloc:
                         video_response = self.Client.get(iframe_src)
                         video_response.raise_for_status()
-                        return video_response.text
+                        page = video_response.text
+                        if "canPlayFHD=1" in iframe_parts.query and "canPlayFHD" not in page:
+                            page += "\nwindow.canPlayFHD = true;\n"
+                        return page
                     return iframe_src
             except (HTTPError, OSError) as exc:
                 last_exc = exc
@@ -171,14 +174,15 @@ class Animeunity(Provider):
         asn = parameter("asn")
         if asn:
             query["asn"] = asn
-        if re.search(r"window\.canPlayFHD\s*=\s*true\b", page):
+        if re.search(r"window\.canPlayFHD\s*=\s*(?:true|1)\b", page, re.IGNORECASE):
             query["h"] = "1"
         return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
     def _resolve_best_hls_variant(self, master_url: str) -> str | None:
         """
-        Risolve direttamente la variante HLS a massima banda (es. 1080p FHD)
-        per evitare il probing multi-variante di FFmpeg e dimezzare la latenza di avvio/skip.
+        Risolve direttamente la variante HLS alla massima qualità possibile
+        (ordinando per risoluzione in pixel e poi per BANDWIDTH, es. 1920x1080 FHD)
+        per garantire sempre lo streaming alla qualità massima ed eliminare il probing multi-variante.
         """
         try:
             with self._http_lock:
@@ -190,15 +194,18 @@ class Animeunity(Provider):
             lines = text.splitlines()
             if any(line.startswith("#EXT-X-MEDIA:") for line in lines):
                 return None
-            variants: list[tuple[int, str]] = []
+            variants: list[tuple[int, int, str]] = []
             base_url = str(getattr(master_resp, "url", master_url) or master_url)
             for idx, line in enumerate(lines[:-1]):
                 if line.startswith("#EXT-X-STREAM-INF"):
+                    res_match = re.search(r"\bRESOLUTION=(\d+)x(\d+)", line)
+                    pixels = (int(res_match.group(1)) * int(res_match.group(2))) if res_match else 0
                     bw = re.search(r"\bBANDWIDTH=(\d+)", line)
+                    bandwidth = int(bw.group(1)) if bw else 0
                     variant = lines[idx + 1].strip()
                     if variant and not variant.startswith("#"):
-                        variants.append((int(bw.group(1)) if bw else 0, urljoin(base_url, variant)))
-            return max(variants)[1] if variants else None
+                        variants.append((pixels, bandwidth, urljoin(base_url, variant)))
+            return max(variants)[2] if variants else None
         except Exception:
             return None
 

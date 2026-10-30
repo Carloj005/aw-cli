@@ -142,7 +142,7 @@ def legacy(base_dir: str = "") -> list[Anime]:
         if len(row) < 8:
             row.append("0")
         anime = Anime(name=row[0], ref=row[2], curr_ep=row[1], last_ep=row[5])
-        anime.update_episodes({anime.curr_ep: "Not available"}, ut.config_data["general"]["specials"])
+        anime.update_episodes({anime.curr_ep: "Not available"}, ut.config_data["general"].get("specials", False))
         episode = anime.episode(anime.curr_ep)
         if episode:
             if (progress := int(row[7])) == 0:

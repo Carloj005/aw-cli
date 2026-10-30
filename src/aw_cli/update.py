@@ -1,3 +1,5 @@
+import re
+import sys
 import subprocess
 import shutil
 from . import utilities as ut
@@ -9,19 +11,16 @@ REPO_URL = "git+https://github.com/Carloj005/aw-cli.git@branch-name"
 TOOLS = {
     "uv": {
         "list": ["uv", "tool", "list"],
-        "update": ["uv", "tool", "update", "aw-cli"],
-        "install_git": ["uv", "tool", "install", REPO_URL, "--force"]
+        "install_git": ["uv", "tool", "install", REPO_URL, "--force"],
     },
     "pipx": {
         "list": ["pipx", "list"],
-        "update": ["pipx", "update", "aw-cli"],
-        "install_git": ["pipx", "install", REPO_URL, "--force"]
+        "install_git": ["pipx", "install", REPO_URL, "--force"],
     },
     "pip": {
-        "list": ["pip", "list"],
-        "update": ["pip", "install", "aw-cli", "--upgrade"],
-        "install_git": ["pip", "install", REPO_URL, "--force-reinstall"]
-    }
+        "list": [sys.executable, "-m", "pip", "list"],
+        "install_git": [sys.executable, "-m", "pip", "install", REPO_URL, "--force-reinstall"],
+    },
 }
 
 
@@ -33,38 +32,30 @@ def check_installation_method() -> str | None:
         str | None: il nome del tool rilevato, o None se non trovato.
     """
     for tool_name, commands in TOOLS.items():
-        if shutil.which(tool_name):
-            result = subprocess.run(commands["list"], capture_output=True)
+        exe = commands["list"][0]
+        if shutil.which(exe) or exe == sys.executable:
+            result = subprocess.run(commands["list"], capture_output=True, check=False)
             if result.returncode == 0 and "aw-cli" in result.stdout.decode("utf-8", errors="replace"):
                 return tool_name
     return None
 
+
 def update(branch: str) -> None:
     """
-    Aggiorna lo script in base al metodo di installazione.
+    Aggiorna lo script dal repository ufficiale del fork (default: branch 'main').
 
     Args:
-        branch (str): il branch da cui aggiornare lo script. Se la stringa è vuota, aggiorna all'ultima versione stabile.
+        branch (str): il branch da cui aggiornare lo script. Se vuoto, usa 'main'.
     """
-    if not branch:
-        try:
-            import httpx
-            from importlib.metadata import version
-            current_ver = version("aw-cli")
-            resp = httpx.get("https://pypi.org/pypi/aw-cli/json", timeout=10)
-            if resp.status_code == 200:
-                latest_ver = resp.json().get("info", {}).get("version", "")
-                if latest_ver == current_ver:
-                    ut.console.print(f"aw-cli è già aggiornato all'ultima versione ({current_ver})!", style="success")
-                    return
-        except Exception:
-            pass
+    target_branch = branch.strip() if branch and branch.strip() else "main"
+    if target_branch.startswith("-") or not re.fullmatch(r"[A-Za-z0-9._/-]{1,100}", target_branch):
+        ut.console.print("Nome branch non valido!", style="error")
+        return
 
     tool = check_installation_method()
     if not tool:
         ut.console.print("Non è stato possibile trovare un metodo di installazione valido per aggiornare aw-cli", style="error")
         return
 
-    command = TOOLS[tool]["install_git"] if branch else TOOLS[tool]["update"]
-    command = [cmd.replace("branch-name", branch) for cmd in command] # sostituisco "branch-name" con il nome del branch
-    subprocess.run(command)
+    command = [cmd.replace("branch-name", target_branch) for cmd in TOOLS[tool]["install_git"]]
+    subprocess.run(command, check=False)
