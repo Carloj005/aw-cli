@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import threading
 from httpx import Client, HTTPError  # , AsyncClient
 from ..anime import Anime
 from .. import utilities as ut
@@ -34,7 +35,8 @@ def update_link(self, callback, anime: Anime, episode: Anime.Episode | None = No
     if episode:
         ut.console.print("Il link dell'episodio è stato cambiato", style="error")
         self.episodes(anime)
-        return callback(self, anime, anime.episode(episode.num))
+        target_ep = anime.episode(episode.num) if anime.has_episode(episode.num) else episode
+        return callback(self, anime, target_ep)
     else:
         ut.console.print("Il link dell'anime è stato cambiato", style="warning")
         res: list[Anime] | None = self.search(anime.name)
@@ -71,6 +73,7 @@ class Provider(ABC):
             client (Client | None): client HTTP opzionale da iniettare (utile per testing).
         """
         self.BASE_URL = url
+        self._http_lock = threading.RLock()
         self.Client = client or Client(
             headers={
                 "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
@@ -178,6 +181,20 @@ class Provider(ABC):
             str: il link.
         """
         return self._episode_link(anime, episode)
+
+    @error_handler(relink=True)
+    def episode_stream_candidates(self, anime: Anime, episode: Anime.Episode) -> list[str]:
+        """
+        Restituisce la lista ordinata di URL candidati per lo streaming dell'episodio
+        (es. HLS 1080p segmentato seguito da fallback MP4 diretto).
+        """
+        return self._episode_stream_candidates(anime, episode)
+
+    def _episode_stream_candidates(self, anime: Anime, episode: Anime.Episode) -> list[str]:
+        """
+        Implementazione predefinita dei candidati per lo streaming: usa `_episode_link`.
+        """
+        return [self._episode_link(anime, episode)]
 
     @abstractmethod
     def _episode_link(self, anime: Anime, episode: Anime.Episode) -> str:
