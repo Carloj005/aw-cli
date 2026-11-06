@@ -12,6 +12,7 @@ from ..domain_resolver import (
     resolve_animeunity_session,
 )
 from ..search_utils import (
+    desanitize_search_query,
     generate_fallback_queries,
     rank_fuzzy_candidates,
     sort_animeunity_records,
@@ -125,7 +126,7 @@ class Animeunity(Provider):
         ]
 
     def _search(self, input: str) -> list[Anime]:
-        query = input.strip()
+        query = desanitize_search_query(input.strip())
         if not query:
             return []
 
@@ -168,16 +169,39 @@ class Animeunity(Provider):
 
         data_attribute = unescape(regex.group(1))
         json_data = json.loads(data_attribute)['data']
+        filter_key = (filter or "a")[0].lower()
+
+        if filter_key == "t":
+            # Ordina le ultime uscite per popolarità (visite decrescenti), deduplicando lo stesso anime
+            sorted_data = sorted(
+                json_data,
+                key=lambda item: int(item.get("anime", {}).get("visite") or 0),
+                reverse=True,
+            )
+            deduped_data = []
+            seen_anime_ids: set[str] = set()
+            for item in sorted_data:
+                aid = str(item.get("anime", {}).get("id", ""))
+                if aid and aid in seen_anime_ids:
+                    continue
+                if aid:
+                    seen_anime_ids.add(aid)
+                deduped_data.append(item)
+            json_data = deduped_data
+
         animes = list[Anime]()
         for data in json_data:
             result = data['anime']
+            ep_num = str(data['number'])
+            if not specials and ("." in ep_num or ep_num == "0"):
+                continue
             title, last_ep, anilist_id, status, info = self._parse_info(result)
-            if filter == "d" and info["Audio"] != "Italiano":
+            if filter_key == "d" and info["Audio"] != "Italiano":
                 continue
-            if filter == "s" and info["Audio"] == "Italiano":
+            if filter_key == "s" and info["Audio"] == "Italiano":
                 continue
-            anime = Anime(title, str(result['id']), curr_ep=str(data['number']), last_ep=last_ep)
-            anime.update_episodes({str(data['number']): str(data['id'])}, specials=specials)
+            anime = Anime(title, str(result['id']), curr_ep=ep_num, last_ep=last_ep)
+            anime.update_episodes({ep_num: str(data['id'])}, specials=specials)
             anime.set_info(anilist_id, status, info)
             animes.append(anime)
         return animes

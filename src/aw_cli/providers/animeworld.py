@@ -1,7 +1,7 @@
 from functools import lru_cache
 import re
 from html import unescape
-from urllib.parse import quote_plus, urlsplit
+from urllib.parse import quote_plus, urlsplit, urlunsplit
 from ..anime import Anime, AnimeStatus
 from ..domain_resolver import (
     DEFAULT_ANIMEWORLD_URL,
@@ -11,6 +11,7 @@ from ..domain_resolver import (
     resolve_animeworld_url,
 )
 from ..search_utils import (
+    desanitize_search_query,
     generate_fallback_queries,
     rank_fuzzy_candidates,
     sort_animeworld_entries,
@@ -37,6 +38,23 @@ class Animeworld(Provider):
         super().__init__(base_url, client=client)
         self._visited = {}
 
+    def _normalize_url(self, url: str) -> str:
+        """
+        Riscrive eventuali vecchi domini di AnimeWorld (es. animeworld.so / animeworld.to
+        salvati in history.json) verso il dominio attivo corrente `self.BASE_URL`.
+        """
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+        if parts.scheme in ("http", "https") and re.fullmatch(
+            r"(?:www\.)?animeworld\.[a-z]{2,10}", host
+        ):
+            base_parts = urlsplit(self.BASE_URL)
+            if base_parts.scheme and base_parts.netloc and parts.netloc.lower() != base_parts.netloc.lower():
+                return urlunsplit(
+                    (base_parts.scheme, base_parts.netloc, parts.path, parts.query, parts.fragment)
+                )
+        return url
+
     @lru_cache
     def _get_html(self, url: str) -> str:
         """
@@ -46,6 +64,7 @@ class Animeworld(Provider):
         if not re.match(r"^https?://", url):
             raise HTTPError("Errore 404: pagina non trovata")
 
+        url = self._normalize_url(url)
         install_doh_fallback()
         try:
             response = self.Client.get(url)
@@ -166,7 +185,7 @@ class Animeworld(Provider):
         return results
 
     def _search(self, input: str) -> list[Anime]:
-        query = input.strip()
+        query = desanitize_search_query(input.strip())
         if not query:
             return []
 
@@ -249,49 +268,68 @@ class Animeworld(Provider):
 
     def _latest(self, filter: str, specials: bool) -> list[Anime]:
         html = self._get_html(self.BASE_URL)
-        animes = list[Anime]()
+        filter_key = (filter or "a")[0].lower()
+        tab_map = {"a": "all", "s": "sub", "d": "dub", "t": "trending"}
+        tab_name = tab_map.get(filter_key, "all")
 
-        # Trova tutti i tag <a> con classe "poster" per estrarre in modo robusto
-        for a_tag in re.findall(r'<a\s+[^>]*class="poster"[^>]*>', html):
-            href_match = re.search(r'href="([^"]+)"', a_tag)
-            title_match = re.search(r'title="([^"]+)"', a_tag)
-            if not href_match or not title_match:
-                continue
+        tab_match = re.search(
+            rf'<div class="content[^"]*"\s+data-name="{tab_name}">(.*?)(?=<div class="content|<div class="widget|\Z)',
+            html,
+            re.DOTALL,
+        )
+        source_html = tab_match.group(1) if tab_match else html
 
-            url = href_match.group(1)
-            title = title_match.group(1)
+        def _parse_posters(chunk: str, filter_specials: bool) -> list[Anime]:
+            parsed = list[Anime]()
+            for a_tag in re.findall(r'<a\s+[^>]*class="poster"[^>]*>', chunk):
+                href_match = re.search(r'href="([^"]+)"', a_tag)
+                title_match = re.search(r'title="([^"]+)"', a_tag)
+                if not href_match or not title_match:
+                    continue
 
-            # Estrae l'episodio dal titolo (es: "Nome Anime Ep 9")
-            ep = "0"
-            ep_match = re.search(r' Ep[\.\s]+([^"]+)$', title)
-            if ep_match:
-                ep = ep_match.group(1).strip()
-                name = title[: ep_match.start()].strip()
-            else:
-                name = title
+                url = href_match.group(1)
+                title = title_match.group(1)
 
-            parts = url.strip("/").split("/")
-            if len(parts) >= 3:
-                anime_slug = parts[1]
-                player_id = parts[2]
-                anime_ref = f"{self.BASE_URL}/play/{anime_slug}"
-                ep_ref = player_id
-            else:
-                anime_ref = self.BASE_URL + url
-                ep_ref = self.BASE_URL + url
+                # Estrae l'episodio dal titolo (es: "Nome Anime Ep 9")
+                ep = "0"
+                ep_match = re.search(r' Ep[\.\s]+([^"]+)$', title)
+                if ep_match:
+                    ep = ep_match.group(1).strip()
+                    name = title[: ep_match.start()].strip()
+                else:
+                    name = title
 
-            anime = Anime(unescape(name), anime_ref, ep)
-            anime.update_episodes({ep: ep_ref}, specials=specials)
-            animes.append(anime)
+                if filter_specials and not specials and ("." in ep or ep == "0"):
+                    continue
 
+                parts = url.strip("/").split("/")
+                if len(parts) >= 3:
+                    anime_slug = parts[1]
+                    player_id = parts[2]
+                    anime_ref = f"{self.BASE_URL}/play/{anime_slug}"
+                    ep_ref = player_id
+                else:
+                    anime_ref = self.BASE_URL + url
+                    ep_ref = self.BASE_URL + url
+
+                anime = Anime(unescape(name), anime_ref, ep)
+                anime.update_episodes({ep: ep_ref}, specials=specials)
+                parsed.append(anime)
+            return parsed
+
+        if tab_match:
+            return _parse_posters(source_html, filter_specials=True)
+
+        animes = _parse_posters(html, filter_specials=False)
         BLOCK_SIZE = 45
         filter_keys = ["a", "s", "d", "t"]
-        multiplier = filter_keys.index(filter[0])
-
+        multiplier = filter_keys.index(filter_key) if filter_key in filter_keys else 0
         start = multiplier * BLOCK_SIZE
         end = (multiplier + 1) * BLOCK_SIZE if multiplier < len(filter_keys) else None
-
-        return animes[start:end]
+        sliced = animes[start:end]
+        if not specials:
+            sliced = [a for a in sliced if not ("." in a.curr_ep or a.curr_ep == "0")]
+        return sliced
 
     def _episodes(self, anime: Anime):
         html = self._get_html(anime.ref)

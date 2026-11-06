@@ -55,6 +55,9 @@ class Fzf:
             multi:    se True abilita la selezione multipla (Ctrl+A = toggle all).
             filter:   se True abilita il filtro per range (formato: inizio-fine).
         """
+        if not elements:
+            return ""
+
         self._port = self._find_free_port()
         cmd = self._build_cmd(
             elements=elements, prompt=prompt, multi=multi, filter=filter
@@ -63,17 +66,25 @@ class Fzf:
         if fzf_bin and cmd and cmd[0] == "fzf":
             cmd[0] = fzf_bin
 
+        port_retries = 0
         try:
             while True:
-                process = subprocess.run(
-                    cmd,
-                    input="\n".join(elements),
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    stdout=subprocess.PIPE,
-                    stderr=None,
-                )
+                try:
+                    process = subprocess.run(
+                        cmd,
+                        input="\n".join(elements),
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        stdout=subprocess.PIPE,
+                        stderr=None,
+                    )
+                except FileNotFoundError:
+                    ut.console.print(
+                        "Errore: 'fzf' non trovato nel sistema! Installalo (es. 'winget install junegunn.fzf') e riprova.",
+                        style="error",
+                    )
+                    exit(1)
 
                 if process.returncode == 130:
                     exit()
@@ -82,6 +93,13 @@ class Fzf:
                     return process.stdout.strip()
 
                 if process.returncode not in (0, 1):
+                    port_retries += 1
+                    if port_retries > 3:
+                        ut.console.print(
+                            f"Errore durante l'avvio di fzf (codice {process.returncode}).",
+                            style="error",
+                        )
+                        exit(1)
                     self._port = self._find_free_port()
                     cmd = self._build_cmd(
                         elements=elements, prompt=prompt, multi=multi, filter=filter

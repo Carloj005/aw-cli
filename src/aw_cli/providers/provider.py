@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import threading
 from httpx import Client, HTTPError  # , AsyncClient
 from ..anime import Anime
+from ..search_utils import desanitize_search_query, strip_dub_tags
 from .. import utilities as ut
 
 
@@ -40,7 +41,10 @@ def update_link(self, callback, anime: Anime, episode: Anime.Episode | None = No
             return callback(self, anime, target_ep)
         else:
             ut.console.print("Il link dell'anime è stato cambiato", style="warning")
-            res: list[Anime] | None = self.search(anime.name)
+            clean_query = strip_dub_tags(desanitize_search_query(anime.name)) or anime.name
+            res: list[Anime] | None = self.search(clean_query)
+            if not res and clean_query != anime.name:
+                res = self.search(anime.name)
             if not res:
                 ut.console.print(f"Errore o nessun risultato durante la ricerca di {anime.name} su {self.__class__.__name__}", style="error")
                 ut.console.print("Cercarlo manualmente", style="highlight")
@@ -48,6 +52,7 @@ def update_link(self, callback, anime: Anime, episode: Anime.Episode | None = No
             matched = (
                 next((r for r in res if r.name == anime.name), None)
                 or next((r for r in res if r == anime), None)
+                or next((r for r in res if r.dub == anime.dub), None)
                 or res[0]
             )
             anime.ref = matched.ref

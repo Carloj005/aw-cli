@@ -11,9 +11,9 @@ class History:
     """
     Classe che gestisce la cronologia degli anime.
     """
-    def __init__(self, path: str = "", anime_log: list[Anime] = []):
+    def __init__(self, path: str = "", anime_log: list[Anime] | None = None):
         self._path = path
-        self._anime_log = anime_log
+        self._anime_log = anime_log if anime_log is not None else []
 
     @classmethod
     def read(cls, path: str) -> "History":
@@ -73,10 +73,14 @@ class History:
         for anime in reversed(self._anime_log):
             for anime_latest in last_releases:
                 if anime == anime_latest and anime.last_ep != anime_latest.last_ep:
-                    anime.update_episodes({
-                        num: anime_latest.episode(num).ref
-                        for num in anime_latest.episodes()
-                    })
+                    same_provider_scheme = anime.ref.isdigit() == anime_latest.ref.isdigit()
+                    if same_provider_scheme:
+                        anime.update_episodes({
+                            num: anime_latest.episode(num).ref
+                            for num in anime_latest.episodes()
+                        })
+                    else:
+                        anime.last_ep = anime_latest.last_ep
                     break
         self.save()
 
@@ -105,14 +109,16 @@ class History:
         """
         Salva la cronologia su un file JSON in modo thread-safe.
         """
+        if not self._path:
+            return
         with _SAVE_LOCK:
+            payload = json.dumps(
+                [anime.to_dict() for anime in self._anime_log],
+                ensure_ascii=False,
+                indent=4,
+            )
             with open(self._path, 'w', encoding='utf-8') as file:
-                json.dump(
-                    [anime.to_dict() for anime in self._anime_log],
-                    file,
-                    ensure_ascii=False,
-                    indent=4
-                )
+                file.write(payload)
 
 def legacy(base_dir: str = "") -> list[Anime]:
     """
@@ -130,26 +136,32 @@ def legacy(base_dir: str = "") -> list[Anime]:
         return []
 
     animes = []
+    status_list = list(AnimeStatus)
     for row in legacy:
+        if not row or not row[0].strip():
+            continue
         if len(row) < 4:
             row.append("??")
         if len(row) < 5:
             row.append("0")
         if len(row) < 6:
-            row.append(row[1])
+            row.append(row[1] if len(row) > 1 else "0")
         if len(row) < 7:
             row.append("0")
         if len(row) < 8:
             row.append("0")
         anime = Anime(name=row[0], ref=row[2], curr_ep=row[1], last_ep=row[5])
         anime.update_episodes({anime.curr_ep: "Not available"}, ut.config_data["general"].get("specials", False))
-        episode = anime.episode(anime.curr_ep)
-        if episode:
-            if (progress := int(row[7])) == 0:
+        if anime.has_episode(anime.curr_ep):
+            episode = anime.episode(anime.curr_ep)
+            progress = int(row[7]) if str(row[7]).lstrip("-").isdigit() else 0
+            if progress <= 0:
                 episode.mark_completed()
             else:
                 episode.set_progress(progress)
-        anime.set_info(int(row[6]), list(AnimeStatus)[int(row[4])], {"Episodi": row[3]})
+        anilist_val = int(row[6]) if str(row[6]).isdigit() else 0
+        status_idx = int(row[4]) if str(row[4]).isdigit() and 0 <= int(row[4]) < len(status_list) else (len(status_list) - 1)
+        anime.set_info(anilist_val, status_list[status_idx], {"Episodi": row[3]})
         animes.append(anime)
 
     return animes

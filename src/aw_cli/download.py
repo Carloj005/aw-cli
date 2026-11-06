@@ -93,6 +93,27 @@ def path(create: bool = True) -> Path:
         dl_path.mkdir(parents=True, exist_ok=True)
     return dl_path
 
+def _build_download_headers(url: str, provider: Provider) -> dict[str, str]:
+    """
+    Costruisce header HTTP puliti per il download verso i CDN senza esporre
+    token CSRF del sito a terze parti, impostando il Referer appropriato.
+    """
+    raw_headers = getattr(getattr(provider, "Client", None), "headers", {}) or {}
+    clean: dict[str, str] = {}
+    user_agent = raw_headers.get("User-Agent") or raw_headers.get("user-agent")
+    if user_agent:
+        clean["User-Agent"] = str(user_agent)
+
+    host = (urlsplit(url).hostname or "").lower()
+    if host == "vixcloud.cc" or host.endswith(".vixcloud.cc") or host.endswith("vix-content.net"):
+        clean["Referer"] = "https://vixcloud.cc/"
+    else:
+        base_url = str(getattr(provider, "BASE_URL", "") or "").strip()
+        if base_url.startswith(("http://", "https://")):
+            clean["Referer"] = f"{base_url.rstrip('/')}/"
+    return clean
+
+
 def episodes(anime: Anime, episodes: list[Anime.Episode], provider: Provider) -> None:
     """
     Scarica più episodi in modo concorrente (max concurrent_downloads).
@@ -104,7 +125,9 @@ def episodes(anime: Anime, episodes: list[Anime.Episode], provider: Provider) ->
     """
     async def download_worker(ep: Anime.Episode, task_id: TaskID, progress: Progress, sem: asyncio.Semaphore):
         async with sem:
-            filename = path() / anime.name / f"{ep}.mp4"
+            safe_anime_dir = ut.sanitize_filename(anime.name)
+            safe_ep_stem = ut.sanitize_filename(str(ep))
+            filename = path() / safe_anime_dir / f"{safe_ep_stem}.mp4"
             if filename.exists():
                 progress.update(task_id, completed=100, total=100, phase="già presente", description=f"[green]Ep. {ep.num} (Esistente)")
                 return
@@ -120,7 +143,7 @@ def episodes(anime: Anime, episodes: list[Anime.Episode], provider: Provider) ->
                 return
             progress.update(task_id, phase="connessione…")
 
-            headers = provider.Client.headers
+            headers = _build_download_headers(url, provider)
             temp_filename = filename.with_name(f"{filename.name}.temp")
             connections = max(1, ut.config_data["general"].get("connections-per-download", DEFAULT_CONNECTIONS))
 
@@ -213,9 +236,19 @@ def episodes(anime: Anime, episodes: list[Anime.Episode], provider: Provider) ->
                     shutil.move(str(temp_filename), str(filename))
                 progress.update(task_id, description=f"[success]Ep. {ep.num} (Completato)[/]")
             except Exception as e:
+                try:
+                    temp_filename.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 progress.update(task_id, phase="errore", description=f"[error]Ep. {ep.num} (Errore)[/]")
                 progress.stop_task(task_id)
                 progress.console.print(f"[error]Errore download Ep. {ep.num}: {e}[/]")
+            except BaseException:
+                try:
+                    temp_filename.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
 
     async def _download_all():
         concurrent_downloads = ut.config_data["general"].get("parallel-downloads", 3)

@@ -1,6 +1,7 @@
 import re
 import threading
 from pathlib import Path
+from .. import utilities as ut
 from .provider import Provider, Anime
 
 class LocalProvider(Provider):
@@ -18,6 +19,15 @@ class LocalProvider(Provider):
         self.history = history
         self._http_lock = threading.RLock()
 
+    def _find_in_history(self, anime: Anime) -> Anime | None:
+        if anime in self.history:
+            return self.history[self.history.index(anime)]
+        sanitized_target = ut.sanitize_filename(anime.name)
+        for item in self.history:
+            if ut.sanitize_filename(item.name) == sanitized_target:
+                return item
+        return None
+
     def _search(self, input: str) -> list[Anime]:
         """Restituisce gli anime scaricati localmente, ignorando l'input di ricerca."""
         animes = []
@@ -34,8 +44,8 @@ class LocalProvider(Provider):
             if not anime.episodes():
                 continue
             self.info_anime(anime)
-            if anime in self.history:
-                other = self.history[self.history.index(anime)]
+            other = self._find_in_history(anime)
+            if other is not None:
                 for ep_num in anime.episodes():
                     if other.has_episode(ep_num):
                         src_ep = other.episode(ep_num)
@@ -55,8 +65,14 @@ class LocalProvider(Provider):
                 anime.curr_ep = anime.episodes()[-1]
         return res
 
+    def _resolve_anime_dir(self, anime: Anime) -> Path:
+        direct = Path(self.BASE_URL) / anime.name
+        if direct.exists() and direct.is_dir():
+            return direct
+        return Path(self.BASE_URL) / ut.sanitize_filename(anime.name)
+
     def _episodes(self, anime: Anime) -> dict[str, str]:
-        base_path = Path(self.BASE_URL) / anime.name
+        base_path = self._resolve_anime_dir(anime)
         if not base_path.exists() or not base_path.is_dir():
             return {}
 
@@ -72,11 +88,11 @@ class LocalProvider(Provider):
         return episodes
 
     def _episode_link(self, anime: Anime, episode: Anime.Episode) -> str:
-        return str(Path(self.BASE_URL) / anime.name / episode.ref)
+        return str(self._resolve_anime_dir(anime) / episode.ref)
 
     def _info_anime(self, anime: Anime):
-        if anime in self.history:
-            other = self.history[self.history.index(anime)]
+        other = self._find_in_history(anime)
+        if other is not None:
             anime.ref = other.ref
             anime.set_info(other.anilist_id, other.status, other.info)
         else:

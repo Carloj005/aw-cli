@@ -45,6 +45,22 @@ _STOPWORDS: frozenset[str] = frozenset(
 )
 
 
+_SANITIZED_TO_ASCII = str.maketrans("”⁎∕꞉‹›︖＼⏐", '"*/:<>?\\|')
+
+
+def desanitize_search_query(text: str) -> str:
+    """
+    Ripristina la punteggiatura ASCII standard nei titoli precedentemente passati
+    da `utilities.sanitize_filename` (es. `꞉` -> `:`, `∕` -> `/`), così che le query
+    inviate ai server di ricerca (es. durante `update_link` dalla cronologia) trovino
+    subito corrispondenza diretta.
+    """
+    if not text:
+        return ""
+    restored = text.replace("．．", "..").translate(_SANITIZED_TO_ASCII)
+    return re.sub(r"\s+", " ", restored).strip()
+
+
 def normalize_search_text(text: str) -> str:
     """
     Normalizza una stringa per il confronto di ricerca:
@@ -53,6 +69,7 @@ def normalize_search_text(text: str) -> str:
     """
     if not text:
         return ""
+    text = desanitize_search_query(text)
     decomposed = unicodedata.normalize("NFKD", text)
     without_marks = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
     cleaned = re.sub(r"[^a-z0-9]+", " ", without_marks.lower())
@@ -257,7 +274,7 @@ def extract_franchise_key(title: str) -> str:
     Estrae la radice normalizzata del franchise dal titolo per raggruppare
     tutte le stagioni/film/OVA della stessa opera.
     """
-    base = strip_dub_tags(title)
+    base = strip_dub_tags(desanitize_search_query(title))
     cut = re.split(
         r"(?::\s+|\s+[-–—]\s*|\s+\b(?:the\s+final\s+season|final\s+season|season\s+\d+|stagione\s+\d+|part(?:e)?\s+\d+|the\s+movie\b|movie\b|film\b|ova\b|oav\b|special\b|prequel\b))",
         base,
