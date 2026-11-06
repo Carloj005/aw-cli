@@ -200,6 +200,13 @@ def find_binary(name: str) -> str | None:
     return None
 
 
+_WIN_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
 def sanitize_filename(filename: str) -> str:
     """
     Sanitizza il nome del file rimuovendo i caratteri non validi e prevenendo path traversal.
@@ -215,13 +222,17 @@ def sanitize_filename(filename: str) -> str:
         filename = filename.replace("..", "．．")
 
     if os_name not in ("Android", "Windows"):
-        return filename.replace("/", "∕").strip()
+        cleaned = filename.replace("/", "∕").strip()
+        return cleaned or "Anime"
 
     forbidden_char = '"*/:<>?\\|'
     replace_char = "”⁎∕꞉‹›︖＼⏐"
     for a, b in zip(forbidden_char, replace_char):
         filename = filename.replace(a, b)
-    filename = filename.strip().rstrip(".")
+    filename = filename.strip().rstrip(". ")
+    stem = filename.split(".", 1)[0].strip().upper()
+    if stem in _WIN_RESERVED_NAMES:
+        filename = f"_{filename}"
     return filename or "Anime"
 
 

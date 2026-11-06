@@ -229,7 +229,16 @@ async def download_vixcloud(
             "-i", str(local_manifest), "-c", "copy", "-f", "mp4", str(filename),
         ]
         process = await asyncio.create_subprocess_exec(*command, stderr=asyncio.subprocess.PIPE)
-        _, stderr = await process.communicate()
+        try:
+            _, stderr = await process.communicate()
+        except BaseException:
+            if getattr(process, "returncode", None) is None:
+                try:
+                    process.kill()
+                    await process.wait()
+                except Exception:
+                    pass
+            raise
         if process.returncode != 0:
             raise RuntimeError(f"ffmpeg: {stderr.decode(errors='replace').strip()}")
         progress.update(task_id, completed=total_duration, total_size=downloaded_bytes, phase=None)
@@ -250,6 +259,9 @@ async def download_with_ffmpeg(
     ]
     if user_agent := headers.get("User-Agent"):
         command.extend(["-user_agent", user_agent])
+    if referer := (headers.get("Referer") or headers.get("referer")):
+        safe_ref = str(referer).replace("\r", "").replace("\n", "")
+        command.extend(["-headers", f"Referer: {safe_ref}\r\n"])
     command.extend(["-i", url, "-c", "copy", "-f", "mp4", str(filename)])
     process = await asyncio.create_subprocess_exec(
         *command,
@@ -281,26 +293,37 @@ async def download_with_ffmpeg(
                 )
 
     stderr_reader = asyncio.create_task(read_stderr())
-    async for line in stdout:
-        key, _, value = line.decode(errors="replace").strip().partition("=")
-        if key == "out_time" and (current := seconds(value)) is not None:
-            elapsed = current
-            progress.update(
-                task_id,
-                completed=min(elapsed, duration_seconds or elapsed),
-                estimated_size=estimated_size(written, elapsed, duration_seconds),
-            )
-        elif key == "total_size" and value.isdigit():
-            written = int(value)
-            progress.update(
-                task_id,
-                size=written,
-                phase=None,
-                estimated_size=estimated_size(written, elapsed, duration_seconds),
-                speed=f"{decimal(round(written / max(monotonic() - started, 0.001)))}/s",
-            )
-    await process.wait()
-    await stderr_reader
+    try:
+        async for line in stdout:
+            key, _, value = line.decode(errors="replace").strip().partition("=")
+            if key == "out_time" and (current := seconds(value)) is not None:
+                elapsed = current
+                progress.update(
+                    task_id,
+                    completed=min(elapsed, duration_seconds or elapsed),
+                    estimated_size=estimated_size(written, elapsed, duration_seconds),
+                )
+            elif key == "total_size" and value.isdigit():
+                written = int(value)
+                progress.update(
+                    task_id,
+                    size=written,
+                    phase=None,
+                    estimated_size=estimated_size(written, elapsed, duration_seconds),
+                    speed=f"{decimal(round(written / max(monotonic() - started, 0.001)))}/s",
+                )
+        await process.wait()
+        await stderr_reader
+    except BaseException:
+        stderr_reader.cancel()
+        if getattr(process, "returncode", None) is None:
+            try:
+                process.kill()
+                await process.wait()
+            except Exception:
+                pass
+        await asyncio.gather(stderr_reader, return_exceptions=True)
+        raise
     if process.returncode != 0:
         raise RuntimeError(f"ffmpeg: {'; '.join(errors)}")
     finished = duration_seconds or elapsed or 1.0

@@ -17,6 +17,7 @@ if sys.platform == "win32":
         pass
 from time import sleep
 from pathlib import Path
+from urllib.parse import unquote
 from signal import signal, SIGINT
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
@@ -114,7 +115,8 @@ def select_episodes(anime: Anime) -> list[Anime.Episode]:
             .split("\n")
         )
 
-    return [anime.episode(num) for num in res]
+    selected_eps = [anime.episode(num) for num in res if num and anime.has_episode(num)]
+    return selected_eps if selected_eps else [anime._episodes[0]]
 
 
 def open_syncplay(ep_url: str, ep_name: str, progress: int) -> tuple[bool, int]:
@@ -246,6 +248,12 @@ def _open_mpv_detailed(ep_url: str, ep_name: str, progress: int) -> tuple[bool, 
         return True, 0, True, True
 
     player_path = _resolve_mpv_binary()
+    if not player_path:
+        ut.console.print(
+            "Player mpv non trovato! Configuralo con 'aw-cli -a' o installalo (es. 'winget install mpv').",
+            style="error",
+        )
+        return False, 0, False, False
     is_remote_stream = ep_url.startswith(("http://", "https://"))
 
     command = [
@@ -340,19 +348,33 @@ def open_vlc(ep_url: str, ep_name: str, progress: int) -> tuple[bool, int]:
         if found:
             player_path = found
 
-    subprocess.run(
-        [
-            player_path,
-            f"--meta-title={ep_name}",
-            f"--start-time={progress}",
-            "--fullscreen",
-            "--",
-            ep_url,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    if not player_path:
+        ut.console.print(
+            "Player VLC non trovato! Configuralo con 'aw-cli -a' o installalo.",
+            style="error",
+        )
+        return False, 0
+
+    try:
+        subprocess.run(
+            [
+                player_path,
+                f"--meta-title={ep_name}",
+                f"--start-time={progress}",
+                "--fullscreen",
+                "--",
+                ep_url,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        ut.console.print(
+            f"Impossibile avviare VLC da '{player_path}'. Verifica la configurazione con 'aw-cli -a'.",
+            style="error",
+        )
+        return False, 0
 
     # se il file di configurazione di VLC esiste, prendo la posizione dell'ultimo episodio riprodotto
     progress = 0
@@ -366,9 +388,28 @@ def open_vlc(ep_url: str, ep_name: str, progress: int) -> tuple[bool, int]:
             with open(vlc_config_path, "r", encoding="utf-8", errors="replace") as file:
                 config = [line.strip() for line in file.readlines()]
                 index = config.index("[RecentsMRL]")
-                urls = config[index + 1].split("=")[1].split(", ")
-                positions = config[index + 2].split("=")[1].split(", ")
-            progress = int(positions[urls.index(ep_url)]) // 1000 if ep_url in urls else 0
+                urls = config[index + 1].split("=", 1)[1].split(", ")
+                positions = config[index + 2].split("=", 1)[1].split(", ")
+
+            candidate_mRLS = {ep_url, unquote(ep_url)}
+            if not ep_url.startswith(("http://", "https://", "file://")):
+                try:
+                    file_uri = Path(ep_url).resolve().as_uri()
+                    candidate_mRLS.add(file_uri)
+                    candidate_mRLS.add(unquote(file_uri))
+                except Exception:
+                    pass
+
+            matched_idx = next(
+                (
+                    idx
+                    for idx, raw_u in enumerate(urls)
+                    if raw_u in candidate_mRLS or unquote(raw_u) in candidate_mRLS
+                ),
+                None,
+            )
+            if matched_idx is not None and matched_idx < len(positions):
+                progress = max(0, int(positions[matched_idx]) // 1000)
         except Exception:
             progress = 0
 
@@ -473,12 +514,25 @@ def watch_episode(
             ut.config_data["anilist"]["user_id"],
             anime.anilist_id,
         )
+        executor.shutdown(wait=False)
 
     # se il video è già stato scaricato lo riproduco invece di farlo in streaming
-    local_file = download.path(create=False) / anime.name / f"{episode}.mp4"
+    dl_base = download.path(create=False)
+    local_file = dl_base / ut.sanitize_filename(anime.name) / f"{ut.sanitize_filename(str(episode))}.mp4"
+    try:
+        raw_local = dl_base / anime.name / f"{episode}.mp4"
+        if not local_file.exists() and raw_local.exists():
+            local_file = raw_local
+    except OSError:
+        pass
     prev_progress = episode.progress
 
-    if local_file.exists():
+    try:
+        has_local_file = local_file.exists()
+    except OSError:
+        has_local_file = False
+
+    if has_local_file:
         stream_candidates = [
             str(local_file)
             if ut.os_name in ("Android", "Windows")
@@ -507,7 +561,7 @@ def watch_episode(
 
         # Se tutti gli URL candidati hanno fallito (es. token scaduto o errore 503 temporaneo),
         # rigeneriamo i link una volta dopo una breve pausa e riproviamo.
-        if not playback_ok and not local_file.exists():
+        if not playback_ok and not has_local_file:
             sleep(0.6)
             refreshed = (
                 provider.episode_stream_candidates(anime, episode)
@@ -931,10 +985,13 @@ def main():
                 provider.episodes(anime)
 
             if not ep_corrente.has_next():
-                ut.console.print(
-                    f"L'episodio {ep_corrente.numeric() + 1} di {anime.name} non è ancora stato rilasciato!",
-                    style="error",
-                )
+                if anime.status == AnimeStatus.FINISHED:
+                    msg = f"Hai già completato tutti gli episodi disponibili di {anime.name}!"
+                else:
+                    next_num = ep_corrente.numeric()
+                    next_label = str(next_num + 1) if next_num > 0 else "successivo"
+                    msg = f"L'episodio {next_label} di {anime.name} non è ancora stato rilasciato!"
+                ut.console.print(msg, style="error")
                 sleep(1)
                 if len(animelist) == 1:
                     exit()
@@ -951,9 +1008,10 @@ def main():
         if downl:
             download.episodes(anime, episodes, provider)
 
-            anime.curr_ep = episode.num
-            if not any(anime == a for a in history.get()):
-                history.update(anime, episode)
+            if not private:
+                anime.curr_ep = episode.num
+                if not any(anime == a for a in history.get()):
+                    history.update(anime, episode)
 
             answer = Fzf().run(["esci", "indietro", "guarda"])
             if answer == "esci":

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 from enum import Enum
 from functools import total_ordering
 from rich.console import Console, ConsoleOptions, RenderResult
@@ -269,12 +270,33 @@ class Anime:
         def __hash__(self) -> int:
             return hash((self._anime, self.num))
 
+        def _sort_key(self) -> tuple[int, float, float, str]:
+            raw = self.num.strip()
+            if "-" in raw:
+                left, right = raw.split("-", 1)
+                try:
+                    start_val = float(left) if left else 0.0
+                    end_val = float(right)
+                    return (0, end_val, start_val, "")
+                except ValueError:
+                    pass
+            try:
+                val = float(raw)
+                return (0, val, val, "")
+            except ValueError:
+                pass
+            if m := re.match(r"^(\d+(?:\.\d+)?)\s*(.*)$", raw):
+                val = float(m.group(1))
+                return (0, val, val, m.group(2).lower())
+            if m := re.search(r"(\d+(?:\.\d+)?)", raw):
+                val = float(m.group(1))
+                return (1, val, val, raw.lower())
+            return (1, float("inf"), float("inf"), raw.lower())
+
         def __lt__(self, other: object) -> bool:
             if not isinstance(other, Anime.Episode) or self._anime != other._anime:
                 return False
-            self_num = self.numeric() if '-' in self.num else float(self.num)
-            other_num = other.numeric() if '-' in other.num else float(other.num)
-            return self_num < other_num
+            return self._sort_key() < other._sort_key()
 
         def has_next(self) -> bool:
             """
@@ -322,15 +344,25 @@ class Anime:
 
             - se è x.5 arrotonda a x.
             - se è x-y restituisce y.
+            - se è uno speciale testuale (es. OVA, SP1) estrae l'intero o restituisce 0.
 
             Returns:
                 int: il numero dell'episodio.
             """
-            if '.' in self.num:
-                return int(self.num.split('.')[0])
-            if '-' in self.num:
-                return int(self.num.split('-')[1])
-            return int(self.num)
+            target = self.num.strip()
+            if "-" in target:
+                parts = target.split("-")
+                if parts[-1].strip():
+                    target = parts[-1].strip()
+            if "." in target:
+                head = target.split(".", 1)[0].strip()
+                if head.isdigit():
+                    return int(head)
+            if target.isdigit():
+                return int(target)
+            if m := re.search(r"(\d+)", target):
+                return int(m.group(1))
+            return 0
 
         def is_completed(self) -> bool:
             """
