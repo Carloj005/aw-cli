@@ -32,27 +32,39 @@ def update_link(self, callback, anime: Anime, episode: Anime.Episode | None = No
     """
     Gestisce il caso in cui il riferimento dell'anime o all'episodio non è più valido
     """
-    if episode:
-        ut.console.print("Il link dell'episodio è stato cambiato", style="error")
-        self.episodes(anime)
-        target_ep = anime.episode(episode.num) if anime.has_episode(episode.num) else episode
-        return callback(self, anime, target_ep)
-    else:
-        ut.console.print("Il link dell'anime è stato cambiato", style="warning")
-        res: list[Anime] | None = self.search(anime.name)
-        if not res:
-            ut.console.print(f"Errore o nessun risultato durante la ricerca di {anime.name} su {self.__class__.__name__}", style="error")
-            ut.console.print("Cercarlo manualmente", style="highlight")
-            exit(1)
-        anime.ref = res[0].ref
-        if len(anime.episodes()) > 0 and callback.__name__ != "_episodes":
-            try:
-                anime.update_episodes(
-                    self._episodes(anime), ut.config_data["general"].get("specials", False)
-                )
-            except Exception:
-                pass
-        return callback(self, anime)
+    try:
+        if episode:
+            ut.console.print("Il link dell'episodio è stato cambiato", style="error")
+            self.episodes(anime)
+            target_ep = anime.episode(episode.num) if anime.has_episode(episode.num) else episode
+            return callback(self, anime, target_ep)
+        else:
+            ut.console.print("Il link dell'anime è stato cambiato", style="warning")
+            res: list[Anime] | None = self.search(anime.name)
+            if not res:
+                ut.console.print(f"Errore o nessun risultato durante la ricerca di {anime.name} su {self.__class__.__name__}", style="error")
+                ut.console.print("Cercarlo manualmente", style="highlight")
+                exit(1)
+            matched = (
+                next((r for r in res if r.name == anime.name), None)
+                or next((r for r in res if r == anime), None)
+                or res[0]
+            )
+            anime.ref = matched.ref
+            if len(anime.episodes()) > 0 and callback.__name__ != "_episodes":
+                try:
+                    anime.update_episodes(
+                        self._episodes(anime), ut.config_data["general"].get("specials", False)
+                    )
+                except Exception:
+                    pass
+            return callback(self, anime)
+    except Exception as e:
+        ut.console.print(
+            f"Errore {e.__class__.__name__} durante {callback.__name__}: {e}",
+            style="error",
+        )
+        exit(1)
 
 
 class Provider(ABC):

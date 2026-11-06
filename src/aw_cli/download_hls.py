@@ -105,14 +105,17 @@ async def download_vixcloud(
         raise UnsupportedHLSPlaylist("Playlist con tracce separate")
     for index, line in enumerate(lines[:-1]):
         if line.startswith("#EXT-X-STREAM-INF"):
+            res_match = re.search(r"\bRESOLUTION=(\d+)x(\d+)", line)
+            pixels = (int(res_match.group(1)) * int(res_match.group(2))) if res_match else 0
             bandwidth = re.search(r"\bBANDWIDTH=(\d+)", line)
+            bw_val = int(bandwidth.group(1)) if bandwidth else 0
             variant = lines[index + 1].strip()
             if variant and not variant.startswith("#"):
-                variants.append((int(bandwidth.group(1)) if bandwidth else 0, variant))
+                variants.append((pixels, bw_val, variant))
 
     media = master
     if variants:
-        media = await client.get(urljoin(str(master.url), max(variants)[1]), headers=headers)
+        media = await client.get(urljoin(str(master.url), max(variants)[2]), headers=headers)
         media.raise_for_status()
 
     playlist = media.text.splitlines()

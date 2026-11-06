@@ -83,8 +83,18 @@ class Anime:
         self._episodes.sort()
         self._num_to_index = {ep.num: i for i, ep in enumerate(self._episodes)}
 
-        if self.has_episode(self.last_ep) and self._episodes[-1] > self.episode(self.last_ep):
-            self.last_ep = self._episodes[-1].num
+        if self._episodes:
+            if not self.last_ep or self.last_ep == "0":
+                self.last_ep = self._episodes[-1].num
+            elif self.has_episode(self.last_ep):
+                if self._episodes[-1] > self.episode(self.last_ep):
+                    self.last_ep = self._episodes[-1].num
+            else:
+                try:
+                    if self._episodes[-1] > Anime.Episode(self, self.last_ep, ""):
+                        self.last_ep = self._episodes[-1].num
+                except ValueError:
+                    self.last_ep = self._episodes[-1].num
 
     def episodes(self) -> list[str]:
         """

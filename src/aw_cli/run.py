@@ -55,15 +55,20 @@ def search_anime(provider: providers.Provider) -> list[Anime]:
     """
 
     def check_search(s: str):
-        if s == "exit":
+        s = s.strip()
+        if s.lower() == "exit":
             exit()
+        if not s:
+            return None
         result = provider.search(s)
         if len(result) != 0:
             return result
 
     ut.console.clear()
     while True:
-        query = Prompt.ask("Cerca un anime", console=ut.console)
+        query = Prompt.ask("Cerca un anime", console=ut.console).strip()
+        if not query:
+            continue
         if res := check_search(query):
             return res
         ut.console.print("La ricerca non ha prodotto risultati", style="error")
@@ -390,7 +395,7 @@ def update_anilist(
         drop (bool, optional): True se l'utente decide di droppare l'anime, altrimenti False.
     """
 
-    if anime.anilist_id == 0:
+    if not anime.anilist_id:
         ut.console.print(
             "Impossibile aggiornare AniList: id anime non trovato!", style="error"
         )
@@ -460,7 +465,7 @@ def watch_episode(
         provider (Provider): il provider da cui prendere il link dell'episodio.
     """
     anilist_rating = None
-    if not (offline or private) and "anilist" in ut.config_data:
+    if not (offline or private) and "anilist" in ut.config_data and anime.anilist_id:
         executor = ThreadPoolExecutor(max_workers=1)
         anilist_rating = executor.submit(
             anilist.get_anime_private_rating,
@@ -756,7 +761,7 @@ def remove_from_history(anime: Anime) -> None:
         and ut.config_data["anilist"]["drop"]
         and Fzf().run(["sì", "no"], f"Droppare {anime.name} su AniList? ") == "sì"
     ):
-        if anime.anilist_id == 0:
+        if not anime.anilist_id:
             ut.console.print(
                 "Impossibile droppare su AniList: id anime non trovato!", style="error"
             )
