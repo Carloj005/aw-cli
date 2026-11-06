@@ -11,7 +11,11 @@ from ..domain_resolver import (
     get_configured_provider_url,
     resolve_animeunity_session,
 )
-from ..search_utils import generate_fallback_queries, rank_fuzzy_candidates
+from ..search_utils import (
+    generate_fallback_queries,
+    rank_fuzzy_candidates,
+    sort_animeunity_records,
+)
 from .provider import Provider, HTTPError
 
 class Animeunity(Provider):
@@ -128,7 +132,8 @@ class Animeunity(Provider):
         _ = self._session  # trigger lazy init
         records = self._query_records(query)
         if records:
-            return [self._record_to_anime(result) for result in records]
+            ordered = sort_animeunity_records(records, query)
+            return [self._record_to_anime(result) for result in ordered]
 
         # Fallback multi-token / fuzzy per tollerare refusi (es. 'steal' vs 'steel')
         # e differenze di punteggiatura/ordine parole nel titolo.
@@ -148,9 +153,10 @@ class Animeunity(Provider):
         if not fallback_records:
             return []
 
+        ordered_fallback = sort_animeunity_records(fallback_records, query)
         candidates = [
             (self._record_to_anime(rec), self._record_aliases(rec))
-            for rec in fallback_records
+            for rec in ordered_fallback
         ]
         return rank_fuzzy_candidates(query, candidates)
 

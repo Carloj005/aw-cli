@@ -10,7 +10,11 @@ from ..domain_resolver import (
     install_doh_fallback,
     resolve_animeworld_url,
 )
-from ..search_utils import generate_fallback_queries, rank_fuzzy_candidates
+from ..search_utils import (
+    generate_fallback_queries,
+    rank_fuzzy_candidates,
+    sort_animeworld_entries,
+)
 from .provider import Provider, HTTPError
 
 
@@ -110,11 +114,14 @@ class Animeworld(Provider):
 
     def _search_filter_html(self, query: str) -> list[tuple[Anime, list[str | None]]]:
         """
-        Estrae i risultati completi dalla pagina `/filter?keyword=...` di AnimeWorld
-        (superando il limite di 5 risultati di `/api/search/v2`), ignorando la sidebar.
+        Estrae i risultati completi dalla pagina `/filter?keyword=...&sort=4` di AnimeWorld
+        in ordine cronologico di uscita (superando il limite di 5 risultati di `/api/search/v2`),
+        ignorando la sidebar.
         """
         try:
-            html = self._get_html(f"{self.BASE_URL}/filter?keyword={quote_plus(query)}")
+            html = self._get_html(
+                f"{self.BASE_URL}/filter?keyword={quote_plus(query)}&sort=4"
+            )
         except Exception:
             return []
 
@@ -171,24 +178,50 @@ class Animeworld(Provider):
                 pass
 
         primary = self._search_api_v2(query)
-        merged: dict[str, tuple[Anime, list[str | None]]] = {}
-        for anime, aliases in primary:
-            key = anime.ref if anime.ref != self.BASE_URL else f"{anime.ref}#{anime.name}"
-            merged[key] = (anime, list(aliases))
+        filter_hits = self._search_filter_html(query)
 
-        # `/api/search/v2` restituisce al massimo 5 risultati: integriamo con `/filter`
-        # quando la lista è piena (franchise con molte stagioni, es. JoJo) o vuota.
-        if len(primary) == 0 or len(primary) >= 5:
-            for anime, aliases in self._search_filter_html(query):
-                if anime.ref not in merged:
-                    merged[anime.ref] = (anime, list(aliases))
+        if filter_hits:
+            api_by_ref: dict[str, tuple[Anime, list[str | None]]] = {
+                anime.ref: (anime, list(aliases))
+                for anime, aliases in primary
+                if anime.ref != self.BASE_URL
+            }
+            ordered_entries: list[tuple[Anime, list[str | None]]] = []
+            seen_refs: set[str] = set()
+            for f_anime, f_aliases in filter_hits:
+                seen_refs.add(f_anime.ref)
+                if f_anime.ref in api_by_ref:
+                    api_anime, api_aliases = api_by_ref[f_anime.ref]
+                    combined = list(api_aliases)
+                    for al in f_aliases:
+                        if al and al not in combined:
+                            combined.append(al)
+                    ordered_entries.append((api_anime, combined))
+                else:
+                    ordered_entries.append((f_anime, list(f_aliases)))
 
-        if merged:
-            return [anime for anime, _ in merged.values()]
+            for p_anime, p_aliases in primary:
+                if p_anime.ref not in seen_refs:
+                    ordered_entries.append((p_anime, list(p_aliases)))
+
+            sorted_entries = sort_animeworld_entries(ordered_entries, lambda a: a.name)
+            return [anime for anime, _ in sorted_entries]
+
+        if primary:
+            return [anime for anime, _ in primary]
 
         # Fallback multi-token / fuzzy per tollerare refusi e ordine parole diverso
         fallback_by_ref: dict[str, tuple[Anime, list[str | None]]] = {}
         for sub_query in generate_fallback_queries(query):
+            for anime, aliases in self._search_filter_html(sub_query):
+                if anime.ref not in fallback_by_ref:
+                    fallback_by_ref[anime.ref] = (anime, list(aliases))
+                else:
+                    _, existing_aliases = fallback_by_ref[anime.ref]
+                    for al in aliases:
+                        if al and al not in existing_aliases:
+                            existing_aliases.append(al)
+
             try:
                 api_hits = self._search_api_v2(sub_query)
             except Exception:
@@ -205,19 +238,14 @@ class Animeworld(Provider):
                     if not existing_anime.info and anime.info:
                         fallback_by_ref[key] = (anime, existing_aliases)
 
-            for anime, aliases in self._search_filter_html(sub_query):
-                if anime.ref not in fallback_by_ref:
-                    fallback_by_ref[anime.ref] = (anime, list(aliases))
-                else:
-                    _, existing_aliases = fallback_by_ref[anime.ref]
-                    for al in aliases:
-                        if al and al not in existing_aliases:
-                            existing_aliases.append(al)
-
         if not fallback_by_ref:
             return []
 
-        return rank_fuzzy_candidates(query, list(fallback_by_ref.values()))
+        ordered_fallback = sort_animeworld_entries(
+            list(fallback_by_ref.values()),
+            lambda a: a.name,
+        )
+        return rank_fuzzy_candidates(query, ordered_fallback)
 
     def _latest(self, filter: str, specials: bool) -> list[Anime]:
         html = self._get_html(self.BASE_URL)

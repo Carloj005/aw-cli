@@ -207,7 +207,8 @@ def rank_fuzzy_candidates(
 ) -> list[T]:
     """
     Ordina i candidati per rilevanza fuzzy rispetto a `query` e scarta il rumore
-    sotto `min_score` (o troppo distante dal miglior match trovato).
+    sotto `min_score` (o troppo distante dal miglior match trovato), preservando
+    l'ordine cronologico delle stagioni (`idx`) a parità di fascia di rilevanza.
     """
     scored: list[tuple[float, int, T]] = []
     for idx, (item, aliases) in enumerate(candidates):
@@ -218,7 +219,221 @@ def rank_fuzzy_candidates(
     if not scored:
         return []
 
-    scored.sort(key=lambda entry: (-entry[0], entry[1]))
-    best_score = scored[0][0]
+    best_score = max(entry[0] for entry in scored)
     cutoff = max(min_score, best_score - 0.20) if best_score >= 0.85 else min_score
-    return [item for score, _, item in scored if score >= cutoff]
+    filtered = [entry for entry in scored if entry[0] >= cutoff]
+    # Raggruppa per fascia di rilevanza (~0.066) così che le varie stagioni/parti
+    # dello stesso anime mantengano l'ordine cronologico fornito in input (`idx`).
+    filtered.sort(key=lambda entry: (-int(entry[0] * 15), entry[1]))
+    return [item for _, _, item in filtered]
+
+
+_SEASON_QUARTER: dict[str, int] = {
+    "inverno": 1,
+    "winter": 1,
+    "primavera": 2,
+    "spring": 2,
+    "estate": 3,
+    "summer": 3,
+    "autunno": 4,
+    "autumn": 4,
+    "fall": 4,
+}
+
+
+def strip_dub_tags(title: str) -> str:
+    """Rimuove tag di lingua/edizione come (ITA), (SUB ITA), (CR), (DUB)."""
+    cleaned = re.sub(
+        r"\s*\((?:ITA|SUB\s*ITA|CR|DUB)\)\s*",
+        " ",
+        title,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def extract_franchise_key(title: str) -> str:
+    """
+    Estrae la radice normalizzata del franchise dal titolo per raggruppare
+    tutte le stagioni/film/OVA della stessa opera.
+    """
+    base = strip_dub_tags(title)
+    cut = re.split(
+        r"(?::\s+|\s+[-–—]\s*|\s+\b(?:the\s+final\s+season|final\s+season|season\s+\d+|stagione\s+\d+|part(?:e)?\s+\d+|the\s+movie\b|movie\b|film\b|ova\b|oav\b|special\b|prequel\b))",
+        base,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    cut = re.sub(r"\s+(?:\d+|ii|iii|iv|v|vi)$", "", cut.strip(), flags=re.IGNORECASE)
+    norm = normalize_search_text(cut)
+    return norm or normalize_search_text(base)
+
+
+def extract_part_number(title: str) -> int:
+    """
+    Estrae l'indice progressivo di parte/stage/stagione dal titolo (default 1),
+    usato per ordinare correttamente `Part 1 -> Part 2 -> Part 3` o `2nd Stage`.
+    """
+    base = strip_dub_tags(title)
+    if match := re.search(
+        r"\b(?:part(?:e)?|stage|cour|special)\s*(\d+)",
+        base,
+        flags=re.IGNORECASE,
+    ):
+        val = int(match.group(1))
+        return val if val >= 1 else 1
+    if match := re.search(
+        r"\b(\d+)(?:st|nd|rd|th)\s*(?:[-–—]?\s*\d+(?:st|nd|rd|th)\s*)?(?:stage|season|part|cour)?",
+        base,
+        flags=re.IGNORECASE,
+    ):
+        val = int(match.group(1))
+        return val if val >= 1 else 1
+    if match := re.search(r"\s+(\d+)$", base):
+        val = int(match.group(1))
+        return val if val >= 1 else 1
+    return 1
+
+
+def sort_animeunity_records(records: list[dict], query: str = "") -> list[dict]:
+    """
+    Ordina i risultati di AnimeUnity raggruppando per franchise e ordinando tutte
+    le stagioni/parti/film in ordine cronologico di uscita (Stagione 1 -> ultima stagione,
+    con SUB subito seguito da ITA per ciascuna stagione).
+    """
+    if len(records) <= 1:
+        return list(records)
+
+    q_norm = normalize_search_text(query)
+
+    work_meta: dict[str, tuple[int, int, int, int]] = {}
+    franchise_first_idx: dict[str, int] = {}
+    franchise_best_rel: dict[str, int] = {}
+    item_info: list[tuple[str, str, int, dict]] = []
+
+    for idx, rec in enumerate(records):
+        raw_title = (
+            rec.get("title_eng")
+            or rec.get("title")
+            or rec.get("title_it")
+            or ""
+        )
+        base_norm = normalize_search_text(strip_dub_tags(raw_title))
+        f_key = extract_franchise_key(raw_title)
+
+        aliases_norm = " ".join(
+            normalize_search_text(a or "")
+            for a in (rec.get("title_eng"), rec.get("title"), rec.get("title_it"))
+        )
+        if f_key not in franchise_first_idx:
+            franchise_first_idx[f_key] = idx
+
+        if q_norm and f_key == q_norm:
+            rel = 0
+        elif q_norm and f_key.startswith(q_norm):
+            rel = 1
+        elif q_norm and q_norm in f_key:
+            rel = 2
+        elif q_norm and q_norm in aliases_norm:
+            rel = 3
+        else:
+            rel = 4
+
+        if f_key not in franchise_best_rel or rel < franchise_best_rel[f_key]:
+            franchise_best_rel[f_key] = rel
+
+        raw_date = str(rec.get("date") or "").strip()
+        year = int(raw_date) if raw_date.isdigit() else 9999
+        season_str = str(rec.get("season") or "").strip().lower()
+        quarter = _SEASON_QUARTER.get(season_str, 3)
+        created = str(rec.get("created_at") or "")
+        # Gli anime iniziati a dicembre YYYY hanno spesso `date=YYYY` e `season=Inverno`
+        # (che appartiene all'inverno successivo all'Autunno YYYY, es. dic 2021 dopo ott 2021).
+        if quarter == 1 and year != 9999 and created.startswith(f"{year}-12"):
+            quarter = 5
+
+        part_num = extract_part_number(raw_title)
+        rec_id = int(rec["id"]) if str(rec.get("id", "")).isdigit() else 999999
+
+        if base_norm not in work_meta:
+            work_meta[base_norm] = (year, quarter, part_num, rec_id)
+        else:
+            prev_y, prev_q, prev_p, prev_id = work_meta[base_norm]
+            merged_y = min(prev_y, year)
+            merged_q = (
+                max(prev_q, quarter)
+                if prev_y == year and 5 in (prev_q, quarter)
+                else min(prev_q, quarter)
+            )
+            work_meta[base_norm] = (
+                merged_y,
+                merged_q,
+                min(prev_p, part_num),
+                min(prev_id, rec_id),
+            )
+
+        is_dub = 1 if (rec.get("dub") or "(ita)" in raw_title.lower()) else 0
+        item_info.append((f_key, base_norm, is_dub, rec))
+
+    item_info.sort(
+        key=lambda entry: (
+            franchise_best_rel[entry[0]],
+            franchise_first_idx[entry[0]],
+            *work_meta[entry[1]],
+            entry[1],
+            entry[2],
+        )
+    )
+    return [entry[3] for entry in item_info]
+
+
+def sort_animeworld_entries(
+    entries: Sequence[tuple[T, Sequence[str | None]]],
+    get_title,
+) -> list[tuple[T, list[str | None]]]:
+    """
+    Raffina l'ordine cronologico (`sort=4`) di AnimeWorld:
+    accoppia sempre SUB prima di (ITA)/(CR) per la stessa stagione e riordina
+    eventuali split `Part/Parte/Stage 1 -> 2 -> 3` fuori posto (es. Stone Ocean).
+    """
+    if len(entries) <= 1:
+        return [(item, list(aliases)) for item, aliases in entries]
+
+    stem_first_idx: dict[str, int] = {}
+    decorated: list[tuple[str, int, int, int, int, T, list[str | None]]] = []
+
+    for idx, (item, aliases) in enumerate(entries):
+        title = str(get_title(item) or "")
+        base = strip_dub_tags(title)
+        # Rimuove suffissi espliciti "Part/Parte/Stage/Cour N" per unificare gli split della stessa stagione
+        stem_raw = re.sub(
+            r"\s*[-–—:]?\s*\b(?:part(?:e)?|stage|cour)\s*\d+\b.*$",
+            "",
+            base,
+            flags=re.IGNORECASE,
+        ).strip()
+        stem = normalize_search_text(stem_raw or base)
+        if stem not in stem_first_idx:
+            stem_first_idx[stem] = idx
+
+        part_match = re.search(
+            r"\b(?:part(?:e)?|stage|cour)\s*(\d+)\b",
+            base,
+            flags=re.IGNORECASE,
+        )
+        part_num = int(part_match.group(1)) if part_match else 1
+        lower_title = title.lower()
+        is_dub = 1 if "(ita)" in lower_title else 0
+        is_cr = 1 if "(cr)" in lower_title else 0
+        decorated.append((stem, part_num, is_dub, is_cr, idx, item, list(aliases)))
+
+    decorated.sort(
+        key=lambda d: (
+            stem_first_idx[d[0]],
+            d[1],
+            d[2],
+            d[3],
+            d[4],
+        )
+    )
+    return [(d[5], d[6]) for d in decorated]
