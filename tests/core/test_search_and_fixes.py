@@ -373,3 +373,35 @@ def test_sort_animeworld_entries_fixes_parts_and_dub_pairing():
         "Le Bizzarre Avventure di JoJo: Stone Ocean Parte 3",
         "Le Bizzarre Avventure di JoJo: Steel Ball Run",
     ]
+
+
+def test_sort_animeunity_unifies_subseries_without_colon_and_japanese_titles():
+    # Franchise senza ":" tra radice e suffisso stagione (Dragon Ball / Z / GT / Super / Daima,
+    # Neon Genesis Evangelion / Evangelion 1.0) e filtro rumore sottostringa (Baki vs Tsubaki).
+    db_scrambled = [
+        {**_make_au_record(10, "Dragon Ball Daima"), "date": "2024", "season": "Autunno"},
+        {**_make_au_record(11, "Dragon Ball GT"), "date": "1996", "season": "Inverno"},
+        {**_make_au_record(12, "Dragon Ball Super"), "date": "2015", "season": "Estate"},
+        {**_make_au_record(13, "Dragon Ball Z"), "date": "1989", "season": "Primavera"},
+        {**_make_au_record(14, "Dragon Ball"), "date": "1986", "season": "Inverno"},
+    ]
+    assert [r["title_eng"] for r in sort_animeunity_records(db_scrambled, "dragon ball")] == [
+        "Dragon Ball",
+        "Dragon Ball Z",
+        "Dragon Ball GT",
+        "Dragon Ball Super",
+        "Dragon Ball Daima",
+    ]
+
+    baki_mixed = [
+        {**_make_au_record(20, "In the Heart of Kunoichi Tsubaki"), "date": "2022", "season": "Primavera"},
+        {**_make_au_record(21, "Baki Hanma"), "date": "2021", "season": "Autunno"},
+        {**_make_au_record(22, "Grappler Baki"), "date": "1994", "season": "Estate"},
+        {**_make_au_record(23, "Baki (2018)"), "date": "2018", "season": "Estate"},
+    ]
+    assert [r["title_eng"] for r in sort_animeunity_records(baki_mixed, "baki")] == [
+        "Grappler Baki",
+        "Baki (2018)",
+        "Baki Hanma",
+        "In the Heart of Kunoichi Tsubaki",
+    ]

@@ -297,14 +297,57 @@ def extract_part_number(title: str) -> int:
 
 def sort_animeunity_records(records: list[dict], query: str = "") -> list[dict]:
     """
-    Ordina i risultati di AnimeUnity raggruppando per franchise e ordinando tutte
-    le stagioni/parti/film in ordine cronologico di uscita (Stagione 1 -> ultima stagione,
-    con SUB subito seguito da ITA per ciascuna stagione).
+    Ordina i risultati di AnimeUnity raggruppando per franchise (unificando prefissi
+    e varianti con la parola intera cercata, es. Dragon Ball / Z / GT / Super / Daima,
+    Neon Genesis Evangelion / Evangelion 1.0, High School DxD / New / BorN / Hero)
+    e ordinando tutte le stagioni/parti/film in ordine cronologico di uscita
+    (Stagione 1 -> ultima stagione, con SUB subito seguito da ITA).
     """
     if len(records) <= 1:
         return list(records)
 
     q_norm = normalize_search_text(query)
+    q_tokens = [t for t in q_norm.split() if t not in _STOPWORDS] or q_norm.split()
+
+    raw_f_keys: list[str] = []
+    for rec in records:
+        raw_title = (
+            rec.get("title_eng")
+            or rec.get("title")
+            or rec.get("title_it")
+            or ""
+        )
+        raw_f_keys.append(extract_franchise_key(raw_title))
+
+    # Unifica sotto-serie che condividono una radice presente nei risultati
+    # (es. "dragon ball" unifica "dragon ball z", "dragon ball gt", "dragon ball super", "dragon ball daima")
+    unique_roots = sorted(
+        {fk for fk in raw_f_keys if len(fk) >= 4},
+        key=len,
+    )
+
+    def _canonical_franchise(fk: str, aliases_tokens: set[str]) -> str:
+        if q_tokens and all(qt in aliases_tokens for qt in q_tokens):
+            # Tutte le parole chiave della query compaiono come parole intere nel titolo/alias
+            # (es. "baki" in "Grappler Baki" e "Baki Hanma", ma NON in "Tsubaki"):
+            # unifichiamo il gruppo principale della query per ordinarlo cronologicamente.
+            return f"__query_exact__{q_norm}"
+        for root in unique_roots:
+            if fk == root or fk.startswith(root + " "):
+                return root
+        return fk
+
+    has_primary_query_match = bool(q_tokens) and any(
+        all(
+            qt in set(
+                normalize_search_text(
+                    r.get("title_eng") or r.get("title") or r.get("title_it") or ""
+                ).split()
+            )
+            for qt in q_tokens
+        )
+        for r in records
+    )
 
     work_meta: dict[str, tuple[int, int, int, int]] = {}
     franchise_first_idx: dict[str, int] = {}
@@ -319,20 +362,36 @@ def sort_animeunity_records(records: list[dict], query: str = "") -> list[dict]:
             or ""
         )
         base_norm = normalize_search_text(strip_dub_tags(raw_title))
-        f_key = extract_franchise_key(raw_title)
+        fk_raw = raw_f_keys[idx]
 
-        aliases_norm = " ".join(
+        aliases_norm_list = [
             normalize_search_text(a or "")
             for a in (rec.get("title_eng"), rec.get("title"), rec.get("title_it"))
-        )
+            if a
+        ]
+        aliases_norm = " ".join(aliases_norm_list)
+        primary_tokens = set(normalize_search_text(raw_title).split())
+        all_alias_tokens = set(aliases_norm.split())
+
+        f_key = _canonical_franchise(fk_raw, primary_tokens)
+        if (
+            not has_primary_query_match
+            and f_key != f"__query_exact__{q_norm}"
+            and q_tokens
+            and all(qt in all_alias_tokens for qt in q_tokens)
+        ):
+            f_key = f"__query_exact__{q_norm}"
+
         if f_key not in franchise_first_idx:
             franchise_first_idx[f_key] = idx
 
-        if q_norm and f_key == q_norm:
+        if f_key == f"__query_exact__{q_norm}":
             rel = 0
-        elif q_norm and f_key.startswith(q_norm):
+        elif q_norm and fk_raw == q_norm:
+            rel = 0
+        elif q_norm and fk_raw.startswith(q_norm):
             rel = 1
-        elif q_norm and q_norm in f_key:
+        elif q_norm and q_norm in fk_raw:
             rel = 2
         elif q_norm and q_norm in aliases_norm:
             rel = 3
@@ -347,8 +406,6 @@ def sort_animeunity_records(records: list[dict], query: str = "") -> list[dict]:
         season_str = str(rec.get("season") or "").strip().lower()
         quarter = _SEASON_QUARTER.get(season_str, 3)
         created = str(rec.get("created_at") or "")
-        # Gli anime iniziati a dicembre YYYY hanno spesso `date=YYYY` e `season=Inverno`
-        # (che appartiene all'inverno successivo all'Autunno YYYY, es. dic 2021 dopo ott 2021).
         if quarter == 1 and year != 9999 and created.startswith(f"{year}-12"):
             quarter = 5
 

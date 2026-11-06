@@ -67,7 +67,7 @@ class Animeunity(Provider):
 
         archivio_url = f"{self.BASE_URL}/archivio/get-animes"
         try:
-            for offset in (0, 30, 60):
+            for offset in (0, 30, 60, 90):
                 payload = {
                     "title": query,
                     "type": False,
