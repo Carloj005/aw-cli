@@ -10,6 +10,7 @@ from ..domain_resolver import (
     install_doh_fallback,
     resolve_animeworld_url,
 )
+from ..search_utils import generate_fallback_queries, rank_fuzzy_candidates
 from .provider import Provider, HTTPError
 
 
@@ -76,24 +77,18 @@ class Animeworld(Provider):
 
         return response.text
 
-    def _search(self, input: str) -> list[Anime]:
-        # Assicuriamoci che il client abbia cookies/csrf-token caricando prima la homepage
-        if "csrf-token" not in self.Client.headers:
-            try:
-                self._get_html(self.BASE_URL)
-            except Exception:
-                pass
-
-        response = self.Client.post(
-            f"{self.BASE_URL}/api/search/v2", params={"keyword": input}
-        )
+    def _search_api_v2(self, query: str) -> list[tuple[Anime, list[str | None]]]:
+        with self._http_lock:
+            response = self.Client.post(
+                f"{self.BASE_URL}/api/search/v2", params={"keyword": query}
+            )
         response.raise_for_status()
 
         data = response.json()
-        if "error" in data or "animes" not in data:
+        if not isinstance(data, dict) or "error" in data or "animes" not in data:
             return []
 
-        animes = []
+        results: list[tuple[Anime, list[str | None]]] = []
         for elem in data["animes"]:
             link = elem.get("link")
             identifier = elem.get("identifier")
@@ -102,14 +97,127 @@ class Animeworld(Provider):
             else:
                 url = self.BASE_URL
 
-            name = elem.get("name", "")
-            anime = Anime(unescape(name), url)
+            name = unescape(elem.get("name", ""))
+            jtitle_raw = elem.get("jtitle")
+            jtitle = unescape(jtitle_raw) if isinstance(jtitle_raw, str) and jtitle_raw else None
+            slug_alias = link.replace("-", " ") if isinstance(link, str) else None
 
-            # Pre-populate all metadata from search JSON using a clean helper
+            anime = Anime(name, url)
             anilist_id, status, info = self._parse_info(elem)
             anime.set_info(anilist_id, status, info)
-            animes.append(anime)
-        return animes
+            results.append((anime, [name, jtitle, slug_alias]))
+        return results
+
+    def _search_filter_html(self, query: str) -> list[tuple[Anime, list[str | None]]]:
+        """
+        Estrae i risultati completi dalla pagina `/filter?keyword=...` di AnimeWorld
+        (superando il limite di 5 risultati di `/api/search/v2`), ignorando la sidebar.
+        """
+        try:
+            html = self._get_html(f"{self.BASE_URL}/filter?keyword={quote_plus(query)}")
+        except Exception:
+            return []
+
+        if not isinstance(html, str) or not html:
+            return []
+
+        block_match = re.search(
+            r'<div class="film-list">(.*?)(?:<div class="paging-wrapper|window\.paginationUrl|<div id="sidebar"|<div class="widget\b|\Z)',
+            html,
+            re.DOTALL,
+        )
+        film_block = block_match.group(1) if block_match else ""
+        if not film_block:
+            return []
+
+        results: list[tuple[Anime, list[str | None]]] = []
+        seen_refs: set[str] = set()
+        for attrs, raw_title in re.findall(
+            r'<a\s+([^>]*\bclass="name"[^>]*)>([^<]+)</a>',
+            film_block,
+        ):
+            href_match = re.search(r'href="(/play/[^"]+)"', attrs)
+            if not href_match:
+                continue
+            href = href_match.group(1)
+            ref = f"{self.BASE_URL}{href}"
+            if ref in seen_refs:
+                continue
+            seen_refs.add(ref)
+
+            title = unescape(raw_title.strip())
+            jtitle_match = re.search(r'data-jtitle="([^"]*)"', attrs)
+            jtitle = unescape(jtitle_match.group(1).strip()) if jtitle_match else None
+            slug_part = href.split("/play/", 1)[-1].rsplit(".", 1)[0].replace("-", " ")
+
+            anime = Anime(title, ref)
+            if "(ITA)" in title:
+                anime.info["Audio"] = "Italiano"
+                anime.dub = True
+            results.append((anime, [title, jtitle, slug_part]))
+
+        return results
+
+    def _search(self, input: str) -> list[Anime]:
+        query = input.strip()
+        if not query:
+            return []
+
+        # Assicuriamoci che il client abbia cookies/csrf-token caricando prima la homepage
+        if "csrf-token" not in self.Client.headers:
+            try:
+                self._get_html(self.BASE_URL)
+            except Exception:
+                pass
+
+        primary = self._search_api_v2(query)
+        merged: dict[str, tuple[Anime, list[str | None]]] = {}
+        for anime, aliases in primary:
+            key = anime.ref if anime.ref != self.BASE_URL else f"{anime.ref}#{anime.name}"
+            merged[key] = (anime, list(aliases))
+
+        # `/api/search/v2` restituisce al massimo 5 risultati: integriamo con `/filter`
+        # quando la lista è piena (franchise con molte stagioni, es. JoJo) o vuota.
+        if len(primary) == 0 or len(primary) >= 5:
+            for anime, aliases in self._search_filter_html(query):
+                if anime.ref not in merged:
+                    merged[anime.ref] = (anime, list(aliases))
+
+        if merged:
+            return [anime for anime, _ in merged.values()]
+
+        # Fallback multi-token / fuzzy per tollerare refusi e ordine parole diverso
+        fallback_by_ref: dict[str, tuple[Anime, list[str | None]]] = {}
+        for sub_query in generate_fallback_queries(query):
+            try:
+                api_hits = self._search_api_v2(sub_query)
+            except Exception:
+                api_hits = []
+            for anime, aliases in api_hits:
+                key = anime.ref if anime.ref != self.BASE_URL else f"{anime.ref}#{anime.name}"
+                if key not in fallback_by_ref:
+                    fallback_by_ref[key] = (anime, list(aliases))
+                else:
+                    existing_anime, existing_aliases = fallback_by_ref[key]
+                    for al in aliases:
+                        if al and al not in existing_aliases:
+                            existing_aliases.append(al)
+                    if not existing_anime.info and anime.info:
+                        fallback_by_ref[key] = (anime, existing_aliases)
+
+            for anime, aliases in self._search_filter_html(sub_query):
+                if anime.ref not in fallback_by_ref:
+                    fallback_by_ref[anime.ref] = (anime, list(aliases))
+                else:
+                    _, existing_aliases = fallback_by_ref[anime.ref]
+                    for al in aliases:
+                        if al and al not in existing_aliases:
+                            existing_aliases.append(al)
+
+        if not fallback_by_ref:
+            return []
+
+        return rank_fuzzy_candidates(query, list(fallback_by_ref.values()))
 
     def _latest(self, filter: str, specials: bool) -> list[Anime]:
         html = self._get_html(self.BASE_URL)
@@ -227,6 +335,21 @@ class Animeworld(Provider):
             info[key] = unescape(value)
 
         anime.set_info(anilist_id, status, info)
+
+        ep_nums = [
+            num_match.group(1)
+            for a_tag in re.findall(r'<li class="episode">[\s\n]*(<a\s+[^>]+>)', html)
+            if (num_match := re.search(r'data-num="([^"]+)"', a_tag))
+        ]
+        if ep_nums:
+            try:
+                max_ep = max(ep_nums, key=lambda n: Anime.Episode(anime, n, ""))
+                if not anime.last_ep or anime.last_ep == "0":
+                    anime.last_ep = max_ep
+                elif Anime.Episode(anime, max_ep, "") > Anime.Episode(anime, anime.last_ep, ""):
+                    anime.last_ep = max_ep
+            except ValueError:
+                anime.last_ep = ep_nums[-1]
 
     def _parse_info(self, elem: dict) -> tuple[int, AnimeStatus, dict[str, str]]:
         """Estrae e mappa i metadati ritornati dal JSON dell'API di ricerca di AnimeWorld."""

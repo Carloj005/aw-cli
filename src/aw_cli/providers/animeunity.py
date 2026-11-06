@@ -11,6 +11,7 @@ from ..domain_resolver import (
     get_configured_provider_url,
     resolve_animeunity_session,
 )
+from ..search_utils import generate_fallback_queries, rank_fuzzy_candidates
 from .provider import Provider, HTTPError
 
 class Animeunity(Provider):
@@ -42,25 +43,116 @@ class Animeunity(Provider):
             return html
 
 
-    def _search(self, input: str) -> list[Anime]:
-        _ = self._session  # trigger lazy init
+    def _query_records(self, query: str) -> list[dict]:
+        """
+        Interroga sia l'archivio completo (`/archivio/get-animes`, senza il limite di 8 risultati
+        dell'autocomplete) sia `/livesearch`, unendo e deduplicando i record per ID.
+        """
+        merged: list[dict] = []
+        seen_ids: set[str] = set()
+
+        def _collect(items: object) -> None:
+            if not isinstance(items, list):
+                return
+            for item in items:
+                if isinstance(item, dict) and item.get("id") is not None:
+                    rec_id = str(item["id"])
+                    if rec_id not in seen_ids:
+                        seen_ids.add(rec_id)
+                        merged.append(item)
+
+        archivio_url = f"{self.BASE_URL}/archivio/get-animes"
+        try:
+            for offset in (0, 30, 60):
+                payload = {
+                    "title": query,
+                    "type": False,
+                    "year": False,
+                    "order": False,
+                    "status": False,
+                    "genres": False,
+                    "offset": offset,
+                    "dubbed": False,
+                    "season": False,
+                }
+                with self._http_lock:
+                    arch_resp = self.Client.post(url=archivio_url, json=payload)
+                arch_resp.raise_for_status()
+                arch_data = arch_resp.json()
+                if not isinstance(arch_data, dict):
+                    break
+                page_records = arch_data.get("records")
+                _collect(page_records)
+                tot = arch_data.get("tot")
+                if (
+                    not isinstance(page_records, list)
+                    or len(page_records) < 30
+                    or not isinstance(tot, int)
+                    or offset + len(page_records) >= tot
+                ):
+                    break
+        except Exception:
+            pass
+
         search_url = f"{self.BASE_URL}/livesearch"
         with self._http_lock:
             response = self.Client.post(
                 url=search_url,
-                data={"title": input}
+                data={"title": query},
             )
         response.raise_for_status()
+        _collect(response.json().get("records", []))
+        return merged
 
-        results = response.json()['records']
-        animes = list[Anime]()
-        for result in results:
-            title, last_ep, anilist_id, status, info = self._parse_info(result)
-            anime = Anime(title, str(result['id']), last_ep=last_ep)
-            anime.set_info(anilist_id, status, info)
-            animes.append(anime)
+    def _record_to_anime(self, result: dict) -> Anime:
+        title, last_ep, anilist_id, status, info = self._parse_info(result)
+        anime = Anime(title, str(result["id"]), last_ep=last_ep)
+        anime.set_info(anilist_id, status, info)
+        return anime
 
-        return animes
+    @staticmethod
+    def _record_aliases(result: dict) -> list[str | None]:
+        slug = result.get("slug")
+        return [
+            result.get("title_eng"),
+            result.get("title"),
+            result.get("title_it"),
+            slug.replace("-", " ") if isinstance(slug, str) else None,
+        ]
+
+    def _search(self, input: str) -> list[Anime]:
+        query = input.strip()
+        if not query:
+            return []
+
+        _ = self._session  # trigger lazy init
+        records = self._query_records(query)
+        if records:
+            return [self._record_to_anime(result) for result in records]
+
+        # Fallback multi-token / fuzzy per tollerare refusi (es. 'steal' vs 'steel')
+        # e differenze di punteggiatura/ordine parole nel titolo.
+        fallback_records: list[dict] = []
+        seen_ids: set[str] = set()
+        for sub_query in generate_fallback_queries(query):
+            try:
+                sub_results = self._query_records(sub_query)
+            except Exception:
+                continue
+            for rec in sub_results:
+                rec_id = str(rec["id"])
+                if rec_id not in seen_ids:
+                    seen_ids.add(rec_id)
+                    fallback_records.append(rec)
+
+        if not fallback_records:
+            return []
+
+        candidates = [
+            (self._record_to_anime(rec), self._record_aliases(rec))
+            for rec in fallback_records
+        ]
+        return rank_fuzzy_candidates(query, candidates)
 
 
     def _latest(self, filter, specials) -> list[Anime]:
@@ -104,7 +196,10 @@ class Animeunity(Provider):
                     }
                 )
             response.raise_for_status()
-            episodes.update({str(episode['number']): str(episode['id']) for episode in response.json()['episodes']})
+            raw_episodes = response.json().get("episodes")
+            if not isinstance(raw_episodes, list):
+                break
+            episodes.update({str(episode["number"]): str(episode["id"]) for episode in raw_episodes})
             start_range = end_range + 1
         return episodes
 
@@ -121,7 +216,10 @@ class Animeunity(Provider):
                     iframe_src = response.text.strip()
                     iframe_parts = urlsplit(iframe_src)
                     if iframe_parts.scheme in {"http", "https"} and iframe_parts.netloc:
-                        video_response = self.Client.get(iframe_src)
+                        video_response = self.Client.get(
+                            iframe_src,
+                            headers={"Referer": f"{self.BASE_URL}/"},
+                        )
                         video_response.raise_for_status()
                         page = video_response.text
                         if "canPlayFHD=1" in iframe_parts.query and "canPlayFHD" not in page:
@@ -186,7 +284,10 @@ class Animeunity(Provider):
         """
         try:
             with self._http_lock:
-                master_resp = self.Client.get(master_url)
+                master_resp = self.Client.get(
+                    master_url,
+                    headers={"Referer": "https://vixcloud.cc/"},
+                )
             master_resp.raise_for_status()
             text = getattr(master_resp, "text", "")
             if not isinstance(text, str) or not text.lstrip().startswith("#EXTM3U"):
@@ -256,7 +357,7 @@ class Animeunity(Provider):
             response = self.Client.get(search_url)
         response.raise_for_status()
         data = response.json()
-        match data['status']:
+        match data.get("status"):
             case "In Corso":
                 anime.status = AnimeStatus.ONGOING
             case "Terminato":
@@ -265,17 +366,29 @@ class Animeunity(Provider):
                 anime.status = AnimeStatus.NOT_RELEASED
             case _:
                 anime.status = AnimeStatus.UNKNOWN
-        anime.last_ep = str(data['episodes_count'])
-        if anime.info.get("Episodi") in (None, "", "??", "0") and data.get("episodes_count"):
-            anime.info["Episodi"] = str(data["episodes_count"])
-        anime.info["Genere"] = ', '.join(data['genres'])
+        ep_count = data.get("episodes_count")
+        if ep_count is not None:
+            anime.last_ep = str(ep_count)
+        if anime.info.get("Episodi") in (None, "", "??", "0", "None") and ep_count not in (None, 0, "0", ""):
+            anime.info["Episodi"] = str(ep_count)
+        raw_genres = data.get("genres") or []
+        anime.info["Genere"] = ", ".join(
+            g.get("name", "") if isinstance(g, dict) else str(g)
+            for g in raw_genres
+            if g
+        )
         # anime.info["Correlati"] = data['related']
 
     def _parse_info(self, data: dict) -> tuple[str, str, int, AnimeStatus, dict[str, str]]:
-        title = data['title_eng'] or data['title'] or data['title_it']
-        last_ep = str(data['real_episodes_count']) if data.get('real_episodes_count') is not None else "0"
-        anilist_id = data['anilist_id']
-        match data['status']:
+        title = data.get("title_eng") or data.get("title") or data.get("title_it") or "Anime"
+        real_eps = data.get("real_episodes_count")
+        last_ep = str(real_eps) if real_eps is not None else "0"
+        raw_anilist = data.get("anilist_id")
+        try:
+            anilist_id = int(raw_anilist) if raw_anilist else 0
+        except (TypeError, ValueError):
+            anilist_id = 0
+        match data.get("status"):
             case "In Corso":
                 status = AnimeStatus.ONGOING
             case "Terminato":
@@ -284,16 +397,25 @@ class Animeunity(Provider):
                 status = AnimeStatus.NOT_RELEASED
             case _:
                 status = AnimeStatus.UNKNOWN
+        ep_cnt = data.get("episodes_count")
+        ep_len = data.get("episodes_length")
         info = {
-            "Categoria": data['type'],
-            "Audio": "Italiano" if data['dub'] else "??",
-            "Data di Uscita": data['date'],
-            "Stagione": data['season'],
-            "Studio": data['studio'],
-            "Voto": data['score'],
-            "Durata": f"{data['episodes_length']} min", # potrebbe non essere in minuti"
-            "Episodi": str(data['episodes_count']) if data['episodes_count'] != 0 else "??",
-            "Visualizzazioni": data['visite'],
-            "Trama": data['plot'],
+            "Categoria": data.get("type") or "??",
+            "Audio": "Italiano" if data.get("dub") else "??",
+            "Data di Uscita": data.get("date") or "??",
+            "Stagione": data.get("season") or "??",
+            "Studio": data.get("studio") or "??",
+            "Voto": str(data["score"]) if data.get("score") is not None else "??",
+            "Durata": f"{ep_len} min" if ep_len is not None else "??",  # potrebbe non essere in minuti
+            "Episodi": str(ep_cnt) if ep_cnt not in (None, 0, "0", "") else "??",
+            "Visualizzazioni": str(data["visite"]) if data.get("visite") is not None else "??",
+            "Trama": data.get("plot") or "",
         }
+        raw_genres = data.get("genres")
+        if isinstance(raw_genres, list) and raw_genres:
+            info["Genere"] = ", ".join(
+                g.get("name", "") if isinstance(g, dict) else str(g)
+                for g in raw_genres
+                if g
+            )
         return title, last_ep, anilist_id, status, info
