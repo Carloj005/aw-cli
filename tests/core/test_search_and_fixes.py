@@ -9,6 +9,8 @@ from aw_cli.search_utils import (
     generate_fallback_queries,
     normalize_search_text,
     rank_fuzzy_candidates,
+    sort_animeunity_records,
+    sort_animeworld_entries,
 )
 
 
@@ -313,3 +315,61 @@ def test_update_link_preserves_dub_variant(monkeypatch):
     res = update_link(provider, callback, stale_history_entry)
     assert res == "ok"
     assert stale_history_entry.ref == "7432"
+
+
+def test_sort_animeunity_records_chronological_jojo_and_december_winter():
+    # Ordine alfabetico "sporco" come restituito da /archivio/get-animes
+    scrambled = [
+        {**_make_au_record(627, "Le Bizzarre Avventure di JoJo: Diamond is Unbreakable"), "date": "2016", "season": "Primavera"},
+        {**_make_au_record(628, "Le Bizzarre Avventure di JoJo: Stardust Crusaders"), "date": "2014", "season": "Primavera"},
+        {**_make_au_record(7432, "Le Bizzarre Avventure di JoJo: Steel Ball Run (ITA)", dub=1), "date": "2026", "season": "Inverno"},
+        {**_make_au_record(7431, "Le Bizzarre Avventure di JoJo: Steel Ball Run", dub=0), "date": "2026", "season": "Inverno"},
+        {**_make_au_record(7808, "Le Bizzarre Avventure di JoJo: Steel Ball Run 2nd - 3rd Stage"), "date": "2026", "season": "Autunno"},
+        {**_make_au_record(3327, "Le Bizzarre Avventure di JoJo: Stone Ocean"), "date": "2021", "season": "Autunno"},
+        {**_make_au_record(2625, "Le Bizzarre Avventure di JoJo: Vento Aureo"), "date": "2018", "season": "Autunno"},
+        {**_make_au_record(2624, "Le Bizzarre Avventure di JoJo"), "date": "2012", "season": "Autunno"},
+    ]
+
+    ordered = sort_animeunity_records(scrambled, "jojo")
+    titles = [r["title_eng"] for r in ordered]
+    assert titles == [
+        "Le Bizzarre Avventure di JoJo",
+        "Le Bizzarre Avventure di JoJo: Stardust Crusaders",
+        "Le Bizzarre Avventure di JoJo: Diamond is Unbreakable",
+        "Le Bizzarre Avventure di JoJo: Vento Aureo",
+        "Le Bizzarre Avventure di JoJo: Stone Ocean",
+        "Le Bizzarre Avventure di JoJo: Steel Ball Run",
+        "Le Bizzarre Avventure di JoJo: Steel Ball Run (ITA)",
+        "Le Bizzarre Avventure di JoJo: Steel Ball Run 2nd - 3rd Stage",
+    ]
+
+    # Verifica che Inverno di dicembre YYYY (es. Entertainment District dic 2021) venga dopo Autunno YYYY (Mugen Train ott 2021)
+    ds = [
+        {**_make_au_record(3337, "Demon Slayer: Entertainment District Arc"), "date": "2021", "season": "Inverno", "created_at": "2021-12-05"},
+        {**_make_au_record(3257, "Demon Slayer: Mugen Train Arc"), "date": "2021", "season": "Autunno", "created_at": "2021-10-10"},
+    ]
+    ordered_ds = sort_animeunity_records(ds, "demon slayer")
+    assert [r["id"] for r in ordered_ds] == [3257, 3337]
+
+
+def test_sort_animeworld_entries_fixes_parts_and_dub_pairing():
+    raw_entries = [
+        (Anime("Le Bizzarre Avventure di JoJo: Vento Aureo (ITA)", "u1"), ["Vento Aureo (ITA)"]),
+        (Anime("Le Bizzarre Avventure di JoJo: Vento Aureo", "u2"), ["Vento Aureo"]),
+        (Anime("Le Bizzarre Avventure di JoJo: Stone Ocean", "u3"), ["Stone Ocean"]),
+        (Anime("Le Bizzarre Avventure di JoJo: Stone Ocean Parte 3", "u4"), ["Stone Ocean Parte 3"]),
+        (Anime("Le Bizzarre Avventure di JoJo: Stone Ocean (ITA)", "u5"), ["Stone Ocean (ITA)"]),
+        (Anime("Le Bizzarre Avventure di JoJo: Stone Ocean Parte 2", "u6"), ["Stone Ocean Parte 2"]),
+        (Anime("Le Bizzarre Avventure di JoJo: Steel Ball Run", "u7"), ["Steel Ball Run"]),
+    ]
+
+    sorted_entries = sort_animeworld_entries(raw_entries, lambda a: a.name)
+    assert [a.name for a, _ in sorted_entries] == [
+        "Le Bizzarre Avventure di JoJo: Vento Aureo",
+        "Le Bizzarre Avventure di JoJo: Vento Aureo (ITA)",
+        "Le Bizzarre Avventure di JoJo: Stone Ocean",
+        "Le Bizzarre Avventure di JoJo: Stone Ocean (ITA)",
+        "Le Bizzarre Avventure di JoJo: Stone Ocean Parte 2",
+        "Le Bizzarre Avventure di JoJo: Stone Ocean Parte 3",
+        "Le Bizzarre Avventure di JoJo: Steel Ball Run",
+    ]
