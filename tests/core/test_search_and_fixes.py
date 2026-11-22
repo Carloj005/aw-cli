@@ -135,19 +135,23 @@ def test_animeunity_search_combines_archivio_beyond_livesearch_cap():
             "Steel Ball Run: JoJo no Kimyou na Bouken",
         )
     ]
-    livesearch_records = archivio_records[:8]
+    search_records = archivio_records[:8]
 
-    def post_side_effect(*args, **kwargs):
+    def get_side_effect(*args, **kwargs):
         url = kwargs.get("url") or (args[0] if args else "")
         resp = MagicMock()
         resp.raise_for_status = lambda: None
-        if "/archivio/get-animes" in url:
-            resp.json.return_value = {"records": archivio_records, "tot": len(archivio_records)}
+        if "/api/archive" in url:
+            resp.json.return_value = {
+                "data": archivio_records,
+                "last_page": 1,
+                "per_page": 30,
+            }
         else:
-            resp.json.return_value = {"records": livesearch_records}
+            resp.json.return_value = {"data": search_records, "count": len(search_records)}
         return resp
 
-    mock_client.post.side_effect = post_side_effect
+    mock_client.get.side_effect = get_side_effect
     results = au._search("jojo")
 
     assert len(results) == 12
@@ -170,20 +174,20 @@ def test_animeunity_search_fuzzy_fallback_on_typo():
         "JoJo no Kimyou na Bouken: Stardust Crusaders",
     )
 
-    def post_side_effect(*args, **kwargs):
-        payload = kwargs.get("json") or kwargs.get("data") or {}
-        q = payload.get("title", "")
+    def get_side_effect(*args, **kwargs):
+        params = kwargs.get("params") or {}
+        q = params.get("query") or params.get("q") or ""
         resp = MagicMock()
         resp.raise_for_status = lambda: None
         if q in ("ball run",):
-            resp.json.return_value = {"records": [sbr_rec], "tot": 1}
+            resp.json.return_value = {"data": [sbr_rec], "last_page": 1, "per_page": 30}
         elif q == "jojo":
-            resp.json.return_value = {"records": [other_rec, sbr_rec], "tot": 2}
+            resp.json.return_value = {"data": [other_rec, sbr_rec], "last_page": 1, "per_page": 30}
         else:
-            resp.json.return_value = {"records": [], "tot": 0}
+            resp.json.return_value = {"data": [], "last_page": 1, "per_page": 30}
         return resp
 
-    mock_client.post.side_effect = post_side_effect
+    mock_client.get.side_effect = get_side_effect
     results = au._search("jojo steal ball run")
 
     assert len(results) == 1
@@ -195,6 +199,7 @@ def test_animeunity_null_safety_and_vixcloud_referer():
     mock_client = MagicMock()
     au = Animeunity(client=mock_client)
     setattr(au, "_session", "<html></html>")
+    au._inertia_version = "ver1"
 
     rec_with_nulls = _make_au_record(
         7826,
@@ -219,16 +224,23 @@ def test_animeunity_null_safety_and_vixcloud_referer():
     anime = Anime(title, "7826", last_ep="5")
     ep = Anime.Episode(anime, "1", "99999")
 
-    embed_resp = MagicMock(text="https://vixcloud.cc/embed/692680?token=abc&expires=999&canPlayFHD=1")
+    embed_resp = MagicMock(
+        status_code=200,
+        headers={"content-type": "application/json"},
+        text='{"props":{"embedUrl":"https://vixcloud.cc/embed/692680?token=abc&expires=999&canPlayFHD=1"}}',
+    )
+    embed_resp.json.return_value = {
+        "props": {"embedUrl": "https://vixcloud.cc/embed/692680?token=abc&expires=999&canPlayFHD=1"}
+    }
     embed_resp.raise_for_status = lambda: None
-    player_resp = MagicMock(text="window.downloadUrl = 'https://cdn.example.com/ep1.mp4';")
+    player_resp = MagicMock(status_code=200, text="window.downloadUrl = 'https://cdn.example.com/ep1.mp4';")
     player_resp.raise_for_status = lambda: None
     mock_client.get.side_effect = [embed_resp, player_resp]
 
     url = au._episode_link(anime, ep)
     assert url == "https://cdn.example.com/ep1.mp4"
     iframe_call = mock_client.get.call_args_list[1]
-    assert iframe_call.kwargs["headers"]["Referer"] == "https://www.animeunity.co/"
+    assert iframe_call.kwargs["headers"]["Referer"] == "https://animeunity.cx/"
 
 
 def test_animeworld_filter_html_excludes_sidebar_and_fuzzy_matches():
