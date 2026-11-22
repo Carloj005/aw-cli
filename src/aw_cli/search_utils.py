@@ -383,7 +383,12 @@ def sort_animeunity_records(records: list[dict], query: str = "") -> list[dict]:
 
         aliases_norm_list = [
             normalize_search_text(a or "")
-            for a in (rec.get("title_eng"), rec.get("title"), rec.get("title_it"))
+            for a in (
+                rec.get("title_eng"),
+                rec.get("title"),
+                rec.get("title_ja"),
+                rec.get("title_it"),
+            )
             if a
         ]
         aliases_norm = " ".join(aliases_norm_list)
@@ -418,7 +423,7 @@ def sort_animeunity_records(records: list[dict], query: str = "") -> list[dict]:
         if f_key not in franchise_best_rel or rel < franchise_best_rel[f_key]:
             franchise_best_rel[f_key] = rel
 
-        raw_date = str(rec.get("date") or "").strip()
+        raw_date = str(rec.get("year") if rec.get("year") is not None else (rec.get("date") or "")).strip()
         year = int(raw_date) if raw_date.isdigit() else 9999
         season_str = str(rec.get("season") or "").strip().lower()
         quarter = _SEASON_QUARTER.get(season_str, 3)
@@ -446,7 +451,15 @@ def sort_animeunity_records(records: list[dict], query: str = "") -> list[dict]:
                 min(prev_id, rec_id),
             )
 
-        is_dub = 1 if (rec.get("dub") or "(ita)" in raw_title.lower()) else 0
+        is_dub = (
+            1
+            if (
+                rec.get("dub")
+                or str(rec.get("_variant_lang") or "").lower() == "ita"
+                or "(ita)" in raw_title.lower()
+            )
+            else 0
+        )
         item_info.append((f_key, base_norm, is_dub, rec))
 
     item_info.sort(

@@ -73,6 +73,9 @@ def test_anti_phishing_rejects_clone_without_csrf():
     assert domain_resolver.is_valid_animeunity_html(
         '<html><head><meta name="csrf-token" content="abc"></head><body><layout-items></layout-items></body></html>'
     )
+    assert domain_resolver.is_valid_animeunity_html(
+        '<html><body><div id="app" data-page="{&quot;component&quot;:&quot;Home&quot;,&quot;props&quot;:{&quot;scws_url&quot;:&quot;https://vixcloud.cc&quot;}}"></div></body></html>'
+    )
 
 
 def test_animeunity_stream_candidates_prefer_1080p_hls_with_mp4_fallback():
@@ -81,6 +84,7 @@ def test_animeunity_stream_candidates_prefer_1080p_hls_with_mp4_fallback():
     mock_client = MagicMock()
     au = Animeunity(client=mock_client)
     setattr(au, "_session", "<html></html>")
+    au._inertia_version = "ver1"
 
     anime = Anime("Attack on Titan 3 (ITA)", "2620")
     episode = Anime.Episode(anime, "8", ref="45633")
@@ -101,11 +105,16 @@ def test_animeunity_stream_candidates_prefer_1080p_hls_with_mp4_fallback():
         "https://vixcloud.cc/playlist/332759?type=video&rendition=720p&token=v720\n"
     )
 
-    resp_embed_url = MagicMock(text="https://vixcloud.cc/embed/332759")
+    resp_embed_url = MagicMock(
+        status_code=200,
+        headers={"content-type": "application/json"},
+        text='{"props":{"embedUrl":"https://vixcloud.cc/embed/332759"}}',
+    )
+    resp_embed_url.json.return_value = {"props": {"embedUrl": "https://vixcloud.cc/embed/332759"}}
     resp_embed_url.raise_for_status = lambda: None
-    resp_page = MagicMock(text=embed_page)
+    resp_page = MagicMock(status_code=200, text=embed_page)
     resp_page.raise_for_status = lambda: None
-    resp_master = MagicMock(text=hls_master_manifest, url="https://vixcloud.cc/playlist/332759")
+    resp_master = MagicMock(status_code=200, text=hls_master_manifest, url="https://vixcloud.cc/playlist/332759")
     resp_master.raise_for_status = lambda: None
 
     mock_client.get.side_effect = [resp_embed_url, resp_page, resp_master]
@@ -203,6 +212,7 @@ def test_max_quality_selection_ranks_highest_resolution_and_bitrate():
     mock_client = MagicMock()
     au = Animeunity(client=mock_client)
     setattr(au, "_session", "<html></html>")
+    au._inertia_version = "ver1"
 
     page = """
         window.masterPlaylist = {
@@ -220,11 +230,16 @@ def test_max_quality_selection_ranks_highest_resolution_and_bitrate():
         "#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1280x720\n"
         "https://vixcloud.cc/playlist/555?rendition=720p\n"
     )
-    r1 = MagicMock(text="https://vixcloud.cc/embed/555?canPlayFHD=1")
+    r1 = MagicMock(
+        status_code=200,
+        headers={"content-type": "application/json"},
+        text='{"props":{"embedUrl":"https://vixcloud.cc/embed/555?canPlayFHD=1"}}',
+    )
+    r1.json.return_value = {"props": {"embedUrl": "https://vixcloud.cc/embed/555?canPlayFHD=1"}}
     r1.raise_for_status = lambda: None
-    r2 = MagicMock(text=page)
+    r2 = MagicMock(status_code=200, text=page)
     r2.raise_for_status = lambda: None
-    r3 = MagicMock(text=manifest, url="https://vixcloud.cc/playlist/555")
+    r3 = MagicMock(status_code=200, text=manifest, url="https://vixcloud.cc/playlist/555")
     r3.raise_for_status = lambda: None
     mock_client.get.side_effect = [r1, r2, r3]
 

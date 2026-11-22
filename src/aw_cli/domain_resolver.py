@@ -19,12 +19,13 @@ from httpx import Client, HTTPError
 from . import utilities as ut
 
 # Domini predefiniti ufficiali (comunicati sui canali Telegram ufficiali)
-DEFAULT_ANIMEUNITY_URL = "https://animeunity.co"
+DEFAULT_ANIMEUNITY_URL = "https://animeunity.cx"
 DEFAULT_ANIMEWORLD_URL = "https://www.animeworld.ac"
 
 # Fonti pubbliche (canali Telegram web preview e repository community aggiornate)
 ANIMEUNITY_DISCOVERY_SOURCES = [
     "https://t.me/s/animeunitytv",
+    "https://raw.githubusercontent.com/Carloj005/aw-cli/main/src/aw_cli/domain_resolver.py",
     "https://raw.githubusercontent.com/fexh10/aw-cli/main/src/aw_cli/providers/animeunity.py",
     "https://raw.githubusercontent.com/doGior/doGiorsHadEnough/master/AnimeUnity/src/main/kotlin/it/dogior/hadEnough/AnimeUnityPlugin.kt",
 ]
@@ -36,7 +37,7 @@ ANIMEWORLD_DISCOVERY_SOURCES = [
 
 # TLD candidati in ordine di probabilità storica per lo scan di emergenza
 ANIMEUNITY_CANDIDATE_TLDS = [
-    "co", "so", "to", "tv", "it", "cc", "io", "me", "ac", "org", "net", "sh", "sx"
+    "cx", "co", "so", "to", "tv", "it", "cc", "io", "me", "ac", "org", "net", "sh", "sx"
 ]
 
 ANIMEWORLD_CANDIDATE_TLDS = [
@@ -76,15 +77,26 @@ def extract_origin(url: str, fallback: str = "") -> str:
 
 def is_valid_animeunity_html(html: str) -> bool:
     """
-    Verifica che l'HTML appartenga realmente ad AnimeUnity e non a una pagina
-    di blocco ISP, Cloudflare challenge o sito clone malevolo.
+    Verifica che l'HTML appartenga realmente ad AnimeUnity (nuova app Inertia.js
+    oppure vecchio layout con CSRF) e non a una pagina di blocco ISP, Cloudflare
+    challenge o sito clone malevolo.
     """
     if not html:
         return False
+    lower = html.lower()
+    has_inertia = "data-page=" in html and (
+        "latestepisodes" in lower
+        or "carouselanimes" in lower
+        or "scws_url" in lower
+        or "api.anime.episodes.index" in lower
+        or ("ziggy" in lower and "animeunity" in lower)
+    )
+    if has_inertia:
+        return True
     has_csrf = bool(re.search(r'<meta[^>]*name="csrf-token"[^>]*content="([^"]+)"', html))
     has_marker = (
         "<layout-items" in html
-        or "animeunity" in html.lower()
+        or "animeunity" in lower
         or "/livesearch" in html
     )
     return has_csrf and has_marker
@@ -269,7 +281,7 @@ def resolve_animeunity_session(client: Client, initial_url: str) -> tuple[str, s
     install_doh_fallback()
 
     candidates: list[str] = []
-    for base in (initial_url, DEFAULT_ANIMEUNITY_URL, "https://www.animeunity.co"):
+    for base in (initial_url, DEFAULT_ANIMEUNITY_URL, "https://www.animeunity.cx"):
         norm = normalize_base_url(base)
         if norm not in candidates:
             candidates.append(norm)
@@ -295,10 +307,14 @@ def resolve_animeunity_session(client: Client, initial_url: str) -> tuple[str, s
                     pass
         return None
 
-    # 1. Prova i candidati diretti (configurato + https://animeunity.co + https://www.animeunity.co)
+    # 1. Prova i candidati diretti (configurato + https://animeunity.cx + https://www.animeunity.cx)
+    initial_host = (urlsplit(normalize_base_url(initial_url)).hostname or "").removeprefix("www.")
     for candidate in candidates:
         res = _try_candidate(candidate)
         if res is not None:
+            resolved_host = (urlsplit(res[0]).hostname or "").removeprefix("www.")
+            if resolved_host and initial_host and resolved_host != initial_host:
+                save_configured_provider_url("animeunity", res[0])
             return res
 
     # 2. Il dominio principale potrebbe essere cambiato (annuncio Telegram): cerca dalle fonti

@@ -50,9 +50,13 @@ def update_fixtures():
     respectful_sleep()
 
     print("Scaricando i risultati di ricerca JSON per AnimeUnity...")
-    _ = au._session  # Inizializza sessione/cookies
+    _ = au._session  # Inizializza sessione/cookies/versione Inertia
     respectful_sleep()
-    response = au.Client.post(f"{au.BASE_URL}/livesearch", data={"title": "naruto"})
+    response = au.Client.get(
+        f"{au.BASE_URL}/api/search",
+        params={"q": "naruto"},
+        headers=au._api_headers(),
+    )
     (fixtures_dir / "au_search.json").write_text(json.dumps(response.json(), indent=2), encoding="utf-8")
     respectful_sleep()
 
@@ -61,8 +65,9 @@ def update_fixtures():
     respectful_sleep()
 
     print("Scaricando i dati info JSON per un anime di AnimeUnity (id 1469 - Naruto)...")
-    response_au_info = au.Client.get(f"{au.BASE_URL}/info_api/1469/")
-    (fixtures_dir / "au_info.json").write_text(json.dumps(response_au_info.json(), indent=2), encoding="utf-8")
+    page_au_info = au._inertia_get("/anime/1469-x", component="Anime", partial_data=["anime"])
+    anime_info_data = (page_au_info.get("props") or {}).get("anime") or page_au_info
+    (fixtures_dir / "au_info.json").write_text(json.dumps(anime_info_data, indent=2), encoding="utf-8")
 
     print("✓ Tutte le fixtures salvate con successo nella cartella:", fixtures_dir.resolve())
 

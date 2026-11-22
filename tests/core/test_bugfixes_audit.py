@@ -359,20 +359,102 @@ def test_animeworld_rewrites_legacy_domains_to_active_base_url():
 
 def test_animeunity_latest_trending_sorts_by_views_and_deduplicates():
     au = Animeunity(client=MagicMock())
-    items = {
+    top_payload = {
         "data": [
-            {"id": 10, "number": "2", "anime": {"id": 1, "title_eng": "Low Views", "visite": 100, "real_episodes_count": 2}},
-            {"id": 21, "number": "5", "anime": {"id": 2, "title_eng": "Top Hit", "visite": 50000, "real_episodes_count": 5}},
-            {"id": 20, "number": "4", "anime": {"id": 2, "title_eng": "Top Hit", "visite": 50000, "real_episodes_count": 5}},
-            {"id": 30, "number": "3.5", "anime": {"id": 3, "title_eng": "Recap Special", "visite": 99999, "real_episodes_count": 3}},
+            {
+                "id": 7771,
+                "title": "Black Clover 2",
+                "type": "tv",
+                "season": "fall",
+                "year": 2026,
+                "views": 561082,
+                "variants": [
+                    {"language": "jpn", "status": "ongoing", "episodes_count": 8},
+                    {"language": "ita", "status": "ongoing", "episodes_count": 5},
+                ],
+            },
+            {
+                "id": 12,
+                "title": "One Piece",
+                "type": "tv",
+                "season": "fall",
+                "year": 1999,
+                "views": 184873140,
+                "variants": [{"language": "jpn", "status": "ongoing", "episodes_count": 1180}],
+            },
         ]
     }
-    escaped = json.dumps(items).replace('"', "&quot;")
-    setattr(au, "_session", f'<layout-items items-json="{escaped}"></layout-items>')
+    setattr(au, "_session", "<html></html>")
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = top_payload
+    resp.raise_for_status = lambda: None
+    au.Client.get.return_value = resp
 
     trending = au._latest("t", specials=False)
-    assert [a.name for a in trending] == ["Top Hit", "Low Views"]
-    assert trending[0].curr_ep == "5"
+    assert [a.name for a in trending] == ["Black Clover 2", "One Piece"]
+    assert trending[0].curr_ep == "8"
+    assert trending[1].curr_ep == "1180"
+
+
+def test_animeunity_cx_variant_expansion_and_legacy_id_redirect_and_inertia_409():
+    au = Animeunity(client=MagicMock())
+    setattr(au, "_session", "<html></html>")
+    au._inertia_version = "old-ver"
+
+    # 1. Espansione varianti (SUB + ITA con conteggi episodi distinti)
+    rec = {
+        "id": 7771,
+        "title": "Black Clover 2",
+        "type": "tv",
+        "season": "fall",
+        "year": 2026,
+        "variants": [
+            {"language": "ita", "status": "ongoing", "episodes_count": 5},
+            {"language": "jpn", "status": "ongoing", "episodes_count": 8},
+        ],
+    }
+    expanded = au._expand_record_variants(rec)
+    animes = [au._record_to_anime(r) for r in expanded]
+    assert [(a.name, a.dub, a.last_ep, a.info["Audio"]) for a in animes] == [
+        ("Black Clover 2", False, "8", "Giapponese"),
+        ("Black Clover 2 (ITA)", True, "5", "Italiano"),
+    ]
+
+    # 2. Retry automatico su Inertia 409 + migrazione vecchio ID ITA (7210 -> 7209)
+    r_409 = MagicMock(status_code=409, headers={}, text="")
+    r_home = MagicMock(
+        status_code=200,
+        text='<div id="app" data-page="{&quot;version&quot;:&quot;new-ver&quot;,&quot;props&quot;:{}}"></div>',
+    )
+    r_ok = MagicMock(
+        status_code=200,
+        headers={"content-type": "application/json"},
+        text="{}",
+    )
+    r_ok.json.return_value = {
+        "version": "new-ver",
+        "props": {
+            "anime": {
+                "id": 7209,
+                "title": "Jujutsu Kaisen 3",
+                "anilist_id": 172463,
+                "variants": [{"language": "ita", "status": "completed", "episodes_count": 12}],
+                "studios": [{"name": "MAPPA"}],
+                "genres": [{"name": "Action"}],
+            }
+        },
+    }
+    r_ok.raise_for_status = lambda: None
+    au.Client.get.side_effect = [r_409, r_home, r_ok]
+
+    legacy_entry = Anime("Jujutsu Kaisen 3 (ITA)", "7210")
+    au._info_anime(legacy_entry)
+    assert legacy_entry.ref == "7209"
+    assert legacy_entry.dub is True
+    assert legacy_entry.info["Audio"] == "Italiano"
+    assert legacy_entry.info["Studio"] == "MAPPA"
+    assert legacy_entry.anilist_id == 172463
+    assert au._inertia_version == "new-ver"
 
 
 def test_local_provider_matches_unsanitized_history_entry(tmp_path):

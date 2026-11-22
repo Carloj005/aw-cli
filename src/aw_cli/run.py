@@ -642,7 +642,7 @@ def setup_config() -> None:
     ut.config_data["provider"]["source"] = Fzf().run(
         ["animeunity", "animeworld"], "Scegli il provider: "
     )
-    ut.config_data["provider"]["animeunity_url"] = "https://animeunity.co"
+    ut.config_data["provider"]["animeunity_url"] = "https://animeunity.cx"
 
     # scelta disco / cartella di download (supporto dischi secondari)
     if ut.os_name != "Android":
